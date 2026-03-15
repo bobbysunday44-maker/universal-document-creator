@@ -19,6 +19,7 @@ import {
   uploadBrandScreenshot, getBrandProfiles, deleteBrandProfile,
   getDocuments, getDocument, deleteDocument, downloadDocumentPdf,
   getImageModels, generateImage,
+  getDashboard,
   type BrandProfile, type SavedDocument
 } from '@/lib/api';
 import { Button } from '@/components/ui/button';
@@ -69,12 +70,13 @@ import {
   ChevronDown,
   Search,
   FileDown,
+  BarChart3,
 } from 'lucide-react';
 
 // Main App Component
 function AppContent() {
   const { isAuthenticated, user } = useAuth();
-  const [currentView, setCurrentView] = useState<'landing' | 'app'>('landing');
+  const [currentView, setCurrentView] = useState<'landing' | 'app' | 'dashboard'>('landing');
   const [currentSection, setCurrentSection] = useState('home');
 
   // App State
@@ -124,6 +126,10 @@ function AppContent() {
 
   // Initial loading state
   const [initialLoading, setInitialLoading] = useState(true);
+
+  // Dashboard state
+  const [dashboardData, setDashboardData] = useState<any>(null);
+  const [dashboardLoading, setDashboardLoading] = useState(false);
 
   // Load skills and models
   useEffect(() => {
@@ -374,6 +380,19 @@ function AppContent() {
     toast.info('All fields cleared');
   };
 
+  const handleOpenDashboard = async () => {
+    setCurrentView('dashboard');
+    setDashboardLoading(true);
+    try {
+      const data = await getDashboard();
+      setDashboardData(data);
+    } catch (err) {
+      toast.error('Failed to load dashboard');
+    } finally {
+      setDashboardLoading(false);
+    }
+  };
+
   const handleGenerateImage = async () => {
     if (!imagePrompt.trim()) {
       toast.error('Please enter an image prompt');
@@ -409,6 +428,137 @@ function AppContent() {
   };
 
   const currentModel = models.find(m => m.id === selectedModel);
+
+  // Dashboard View
+  if (currentView === 'dashboard') {
+    return (
+      <div className="min-h-screen bg-background">
+        <Toaster position="top-right" richColors />
+        <header className="fixed top-0 left-0 right-0 z-40 bg-background/80 backdrop-blur-xl border-b">
+          <div className="flex items-center justify-between h-16 px-4 lg:px-6">
+            <div className="flex items-center gap-3">
+              <Button variant="ghost" size="icon" onClick={() => setCurrentView('app')}>
+                <ArrowLeft className="w-5 h-5" />
+              </Button>
+              <span className="font-bold">Dashboard</span>
+            </div>
+          </div>
+        </header>
+
+        <main className="pt-20 pb-8 px-4 lg:px-6">
+          <div className="max-w-5xl mx-auto">
+            {dashboardLoading ? (
+              <div className="flex items-center justify-center py-32">
+                <Loader2 className="w-10 h-10 animate-spin" />
+              </div>
+            ) : dashboardData ? (
+              <div className="space-y-6">
+                {/* Plan & Usage Overview */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                  <Card>
+                    <CardContent className="p-4">
+                      <p className="text-sm text-muted-foreground">Plan</p>
+                      <p className="text-2xl font-bold capitalize">{dashboardData.plan}</p>
+                      {dashboardData.is_admin && <Badge variant="destructive" className="mt-1">Admin</Badge>}
+                    </CardContent>
+                  </Card>
+                  <Card>
+                    <CardContent className="p-4">
+                      <p className="text-sm text-muted-foreground">Total Documents</p>
+                      <p className="text-2xl font-bold">{dashboardData.total_documents}</p>
+                      <p className="text-xs text-muted-foreground">{dashboardData.documents_this_week} this week</p>
+                    </CardContent>
+                  </Card>
+                  <Card>
+                    <CardContent className="p-4">
+                      <p className="text-sm text-muted-foreground">Generations Used</p>
+                      <p className="text-2xl font-bold">
+                        {dashboardData.generations_used}
+                        {!dashboardData.unlimited && <span className="text-sm font-normal text-muted-foreground">/{dashboardData.generations_limit}</span>}
+                      </p>
+                      {dashboardData.unlimited && <Badge variant="outline" className="mt-1">Unlimited</Badge>}
+                    </CardContent>
+                  </Card>
+                  <Card>
+                    <CardContent className="p-4">
+                      <p className="text-sm text-muted-foreground">Member Since</p>
+                      <p className="text-lg font-bold">{new Date(dashboardData.member_since).toLocaleDateString()}</p>
+                    </CardContent>
+                  </Card>
+                </div>
+
+                {/* Usage Progress Bar (free plan only) */}
+                {!dashboardData.unlimited && (
+                  <Card>
+                    <CardContent className="p-4">
+                      <div className="flex items-center justify-between mb-2">
+                        <p className="text-sm font-medium">Monthly Generation Usage</p>
+                        <p className="text-sm text-muted-foreground">{dashboardData.generations_used}/{dashboardData.generations_limit}</p>
+                      </div>
+                      <div className="w-full bg-muted rounded-full h-3">
+                        <div
+                          className="bg-primary rounded-full h-3 transition-all"
+                          style={{ width: `${Math.min((dashboardData.generations_used / dashboardData.generations_limit) * 100, 100)}%` }}
+                        />
+                      </div>
+                      {dashboardData.generations_used >= dashboardData.generations_limit && (
+                        <div className="mt-3 flex items-center justify-between">
+                          <p className="text-sm text-destructive font-medium">Limit reached</p>
+                          <Button size="sm" onClick={() => { setCurrentView('landing'); setTimeout(() => handleNavigate('pricing'), 100); }}>
+                            Upgrade to Pro
+                          </Button>
+                        </div>
+                      )}
+                    </CardContent>
+                  </Card>
+                )}
+
+                {/* Top Skills & Models */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <Card>
+                    <CardContent className="p-4">
+                      <p className="text-sm font-medium mb-3">Most Used Skills</p>
+                      {dashboardData.top_skills.length > 0 ? (
+                        <div className="space-y-2">
+                          {dashboardData.top_skills.map((s: any) => (
+                            <div key={s.name} className="flex items-center justify-between">
+                              <span className="text-sm">{s.name}</span>
+                              <Badge variant="secondary">{s.count}</Badge>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="text-sm text-muted-foreground">No documents yet</p>
+                      )}
+                    </CardContent>
+                  </Card>
+                  <Card>
+                    <CardContent className="p-4">
+                      <p className="text-sm font-medium mb-3">Most Used Models</p>
+                      {dashboardData.top_models.length > 0 ? (
+                        <div className="space-y-2">
+                          {dashboardData.top_models.map((m: any) => (
+                            <div key={m.name} className="flex items-center justify-between">
+                              <span className="text-sm">{m.name}</span>
+                              <Badge variant="secondary">{m.count}</Badge>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="text-sm text-muted-foreground">No documents yet</p>
+                      )}
+                    </CardContent>
+                  </Card>
+                </div>
+              </div>
+            ) : (
+              <p className="text-center text-muted-foreground py-32">Failed to load dashboard data</p>
+            )}
+          </div>
+        </main>
+      </div>
+    );
+  }
 
   // Landing Page View
   if (currentView === 'landing') {
@@ -507,6 +657,13 @@ function AppContent() {
                 <Crown className="w-3 h-3" />
                 Guest Mode
               </Badge>
+            )}
+
+            {/* Dashboard Button */}
+            {isAuthenticated && (
+              <Button variant="outline" size="icon" onClick={handleOpenDashboard} title="Dashboard">
+                <BarChart3 className="w-4 h-4" />
+              </Button>
             )}
 
             {/* Document History Button */}

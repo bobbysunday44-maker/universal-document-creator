@@ -75,6 +75,9 @@ JWT_SECRET = os.getenv("JWT_SECRET", secrets.token_hex(32))
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_HOURS = 72
 
+# Database URL (empty = SQLite, postgresql://... = PostgreSQL)
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+
 # API Keys (loaded from environment or set via settings endpoint)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
@@ -195,6 +198,9 @@ IMAGE_MODELS = [
 ]
 
 # ==================== DATABASE ====================
+# SQLite by default for desktop use. For PostgreSQL (production deploy),
+# run backend/migrate_to_postgres.py to copy data, then set DATABASE_URL
+# in .env. Full PostgreSQL query layer is a planned future enhancement.
 
 def get_db():
     conn = sqlite3.connect(DB_PATH)
@@ -253,9 +259,58 @@ def init_db():
             value TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS teams (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            owner_id INTEGER NOT NULL,
+            plan TEXT NOT NULL DEFAULT 'enterprise',
+            max_members INTEGER DEFAULT 50,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS team_members (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            team_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            role TEXT NOT NULL DEFAULT 'member',
+            joined_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY (team_id) REFERENCES teams(id) ON DELETE CASCADE,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+            UNIQUE(team_id, user_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS shared_templates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            team_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            content TEXT NOT NULL,
+            skill_name TEXT,
+            created_by INTEGER NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY (team_id) REFERENCES teams(id) ON DELETE CASCADE,
+            FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS audit_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            action TEXT NOT NULL,
+            details TEXT,
+            ip_address TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
         CREATE INDEX IF NOT EXISTS idx_documents_user_id ON documents(user_id);
         CREATE INDEX IF NOT EXISTS idx_brand_profiles_user_id ON brand_profiles(user_id);
+        CREATE INDEX IF NOT EXISTS idx_team_members_team ON team_members(team_id);
+        CREATE INDEX IF NOT EXISTS idx_team_members_user ON team_members(user_id);
+        CREATE INDEX IF NOT EXISTS idx_shared_templates_team ON shared_templates(team_id);
+        CREATE INDEX IF NOT EXISTS idx_audit_logs_user ON audit_logs(user_id);
+        CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON audit_logs(action);
+        CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON audit_logs(created_at);
     """)
     conn.commit()
 
@@ -299,6 +354,21 @@ def init_db():
 @app.on_event("startup")
 async def startup():
     init_db()
+
+# ==================== AUDIT LOGGING ====================
+
+def log_audit(user_id: int | None, action: str, details: str = None, ip: str = None):
+    """Log an audit event"""
+    try:
+        conn = get_db()
+        conn.execute(
+            "INSERT INTO audit_logs (user_id, action, details, ip_address) VALUES (?, ?, ?, ?)",
+            (user_id, action, details, ip)
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass  # Don't let audit logging break the app
 
 # ==================== RATE LIMITING ====================
 
@@ -1134,10 +1204,11 @@ async def register_user(req: RegisterRequest):
     user = conn.execute("SELECT id, email, name, plan, created_at FROM users WHERE id = ?", (user_id,)).fetchone()
     conn.close()
 
+    log_audit(user_id, "register", f"New account: {req.email}")
     return AuthResponse(user=UserResponse(**dict(user)), token=create_token(user_id, req.email.lower()))
 
 @app.post("/api/auth/login", response_model=AuthResponse)
-async def login_user(req: LoginRequest):
+async def login_user(req: LoginRequest, request: Request):
     conn = get_db()
     user = conn.execute("SELECT * FROM users WHERE email = ?", (req.email.lower(),)).fetchone()
     conn.close()
@@ -1147,6 +1218,7 @@ async def login_user(req: LoginRequest):
     if hash_password(req.password, user["salt"]) != user["password_hash"]:
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
+    log_audit(user["id"], "login", f"Login from {request.client.host if hasattr(request, 'client') else 'unknown'}")
     return AuthResponse(
         user=UserResponse(id=user["id"], email=user["email"], name=user["name"],
                           plan=user["plan"], created_at=user["created_at"]),
@@ -2052,6 +2124,9 @@ async def generate_document(request: DocumentRequest, user=Depends(get_optional_
         conn.commit()
         conn.close()
 
+    model_id = request.model
+    log_audit(user["id"] if user else None, "generate", f"Model: {model_id}, Skill: {skill_used}")
+
     return DocumentResponse(
         content=content,
         html_content=html_content,
@@ -2161,6 +2236,7 @@ async def export_as_pdf(
     with open(save_path, "wb") as f:
         f.write(pdf_bytes)
 
+    log_audit(None, "export_pdf", f"Filename: {base_filename}")
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
@@ -2207,6 +2283,7 @@ async def export_docx(
         f.write(buffer.getvalue())
     buffer.seek(0)
 
+    log_audit(None, "export_docx", f"Filename: {base_filename}")
     return Response(
         content=buffer.read(),
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -2348,6 +2425,55 @@ async def promote_to_admin(request_data: dict = Body(...)):
     return {"message": f"User {email} promoted to admin with enterprise plan"}
 
 
+@app.get("/api/user/dashboard")
+async def get_user_dashboard(user=Depends(get_current_user)):
+    """Get dashboard stats for the current user"""
+    conn = get_db()
+    user_id = user["id"]
+
+    # Document stats
+    total_docs = conn.execute("SELECT COUNT(*) as c FROM documents WHERE user_id = ?", (user_id,)).fetchone()["c"]
+    recent_docs = conn.execute(
+        "SELECT COUNT(*) as c FROM documents WHERE user_id = ? AND created_at > datetime('now', '-7 days')",
+        (user_id,)
+    ).fetchone()["c"]
+
+    # Generation stats
+    row = conn.execute(
+        "SELECT plan, is_admin, generation_count, generation_reset, created_at FROM users WHERE id = ?",
+        (user_id,)
+    ).fetchone()
+
+    # Skill usage breakdown
+    skill_stats = conn.execute(
+        "SELECT skill_used, COUNT(*) as count FROM documents WHERE user_id = ? AND skill_used IS NOT NULL GROUP BY skill_used ORDER BY count DESC LIMIT 5",
+        (user_id,)
+    ).fetchall()
+
+    # Model usage breakdown
+    model_stats = conn.execute(
+        "SELECT model_used, COUNT(*) as count FROM documents WHERE user_id = ? AND model_used IS NOT NULL GROUP BY model_used ORDER BY count DESC LIMIT 5",
+        (user_id,)
+    ).fetchall()
+
+    conn.close()
+
+    is_unlimited = row["is_admin"] or row["plan"] in ("pro", "enterprise")
+
+    return {
+        "plan": row["plan"],
+        "is_admin": bool(row["is_admin"]),
+        "member_since": row["created_at"],
+        "total_documents": total_docs,
+        "documents_this_week": recent_docs,
+        "generations_used": row["generation_count"] or 0,
+        "generations_limit": None if is_unlimited else 10,
+        "unlimited": is_unlimited,
+        "top_skills": [{"name": r["skill_used"], "count": r["count"]} for r in skill_stats],
+        "top_models": [{"name": r["model_used"], "count": r["count"]} for r in model_stats],
+    }
+
+
 @app.get("/api/user/limits")
 async def get_user_limits(user=Depends(get_current_user)):
     """Get current user's generation limits"""
@@ -2370,6 +2496,280 @@ async def get_user_limits(user=Depends(get_current_user)):
         "generations_limit": None if is_unlimited else 10,
         "unlimited": is_unlimited,
     }
+
+
+# ==================== TEAM ENDPOINTS ====================
+
+@app.post("/api/teams")
+async def create_team(request_data: dict = Body(...), user=Depends(get_current_user)):
+    """Create a new team (enterprise plan required)"""
+    if user.get("plan") not in ("enterprise",) and not user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Enterprise plan required to create teams")
+
+    name = request_data.get("name", "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Team name required")
+
+    conn = get_db()
+    cursor = conn.execute(
+        "INSERT INTO teams (name, owner_id) VALUES (?, ?)",
+        (name, user["id"])
+    )
+    team_id = cursor.lastrowid
+    # Add owner as admin member
+    conn.execute(
+        "INSERT INTO team_members (team_id, user_id, role) VALUES (?, ?, 'admin')",
+        (team_id, user["id"])
+    )
+    conn.commit()
+    conn.close()
+    return {"id": team_id, "name": name, "message": "Team created"}
+
+
+@app.get("/api/teams")
+async def get_my_teams(user=Depends(get_current_user)):
+    """Get teams the user belongs to"""
+    conn = get_db()
+    teams = conn.execute("""
+        SELECT t.id, t.name, t.plan, t.max_members, t.created_at, tm.role,
+               (SELECT COUNT(*) FROM team_members WHERE team_id = t.id) as member_count
+        FROM teams t
+        JOIN team_members tm ON t.id = tm.team_id
+        WHERE tm.user_id = ?
+    """, (user["id"],)).fetchall()
+    conn.close()
+    return {"teams": [dict(t) for t in teams]}
+
+
+@app.get("/api/teams/{team_id}")
+async def get_team(team_id: int, user=Depends(get_current_user)):
+    """Get team details with members"""
+    conn = get_db()
+    # Verify user is member
+    member = conn.execute(
+        "SELECT role FROM team_members WHERE team_id = ? AND user_id = ?",
+        (team_id, user["id"])
+    ).fetchone()
+    if not member:
+        conn.close()
+        raise HTTPException(status_code=403, detail="Not a member of this team")
+
+    team = conn.execute("SELECT * FROM teams WHERE id = ?", (team_id,)).fetchone()
+    members = conn.execute("""
+        SELECT u.id, u.name, u.email, tm.role, tm.joined_at
+        FROM team_members tm
+        JOIN users u ON tm.user_id = u.id
+        WHERE tm.team_id = ?
+    """, (team_id,)).fetchall()
+    conn.close()
+
+    return {
+        "team": dict(team),
+        "members": [dict(m) for m in members],
+        "your_role": member["role"]
+    }
+
+
+@app.post("/api/teams/{team_id}/members")
+async def add_team_member(team_id: int, request_data: dict = Body(...), user=Depends(get_current_user)):
+    """Add a member to a team (admin only)"""
+    conn = get_db()
+    # Verify caller is admin
+    caller = conn.execute(
+        "SELECT role FROM team_members WHERE team_id = ? AND user_id = ?",
+        (team_id, user["id"])
+    ).fetchone()
+    if not caller or caller["role"] != "admin":
+        conn.close()
+        raise HTTPException(status_code=403, detail="Only team admins can add members")
+
+    email = request_data.get("email", "").strip()
+    role = request_data.get("role", "member")
+    if role not in ("member", "admin"):
+        role = "member"
+
+    target = conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
+    if not target:
+        conn.close()
+        raise HTTPException(status_code=404, detail="User not found")
+
+    try:
+        conn.execute(
+            "INSERT INTO team_members (team_id, user_id, role) VALUES (?, ?, ?)",
+            (team_id, target["id"], role)
+        )
+        conn.commit()
+    except Exception:
+        conn.close()
+        raise HTTPException(status_code=400, detail="User already in team")
+
+    conn.close()
+    return {"message": f"Added {email} as {role}"}
+
+
+@app.delete("/api/teams/{team_id}/members/{member_user_id}")
+async def remove_team_member(team_id: int, member_user_id: int, user=Depends(get_current_user)):
+    """Remove a member from a team (admin only)"""
+    conn = get_db()
+    caller = conn.execute(
+        "SELECT role FROM team_members WHERE team_id = ? AND user_id = ?",
+        (team_id, user["id"])
+    ).fetchone()
+    if not caller or caller["role"] != "admin":
+        conn.close()
+        raise HTTPException(status_code=403, detail="Only team admins can remove members")
+
+    conn.execute("DELETE FROM team_members WHERE team_id = ? AND user_id = ?", (team_id, member_user_id))
+    conn.commit()
+    conn.close()
+    return {"message": "Member removed"}
+
+
+# Shared templates
+@app.post("/api/teams/{team_id}/templates")
+async def create_shared_template(team_id: int, request_data: dict = Body(...), user=Depends(get_current_user)):
+    """Share a template with the team"""
+    conn = get_db()
+    member = conn.execute(
+        "SELECT role FROM team_members WHERE team_id = ? AND user_id = ?",
+        (team_id, user["id"])
+    ).fetchone()
+    if not member:
+        conn.close()
+        raise HTTPException(status_code=403, detail="Not a member of this team")
+
+    name = request_data.get("name", "").strip()
+    content = request_data.get("content", "").strip()
+    skill_name = request_data.get("skill_name")
+
+    if not name or not content:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Name and content required")
+
+    cursor = conn.execute(
+        "INSERT INTO shared_templates (team_id, name, content, skill_name, created_by) VALUES (?, ?, ?, ?, ?)",
+        (team_id, name, content, skill_name, user["id"])
+    )
+    conn.commit()
+    conn.close()
+    return {"id": cursor.lastrowid, "message": "Template shared"}
+
+
+@app.get("/api/teams/{team_id}/templates")
+async def get_shared_templates(team_id: int, user=Depends(get_current_user)):
+    """Get shared templates for a team"""
+    conn = get_db()
+    member = conn.execute(
+        "SELECT role FROM team_members WHERE team_id = ? AND user_id = ?",
+        (team_id, user["id"])
+    ).fetchone()
+    if not member:
+        conn.close()
+        raise HTTPException(status_code=403, detail="Not a member of this team")
+
+    templates = conn.execute("""
+        SELECT st.*, u.name as creator_name
+        FROM shared_templates st
+        JOIN users u ON st.created_by = u.id
+        WHERE st.team_id = ?
+        ORDER BY st.created_at DESC
+    """, (team_id,)).fetchall()
+    conn.close()
+    return {"templates": [dict(t) for t in templates]}
+
+
+# ==================== AUDIT LOG ENDPOINTS ====================
+
+@app.get("/api/admin/audit-logs")
+async def get_audit_logs(
+    user=Depends(get_current_user),
+    limit: int = 50,
+    offset: int = 0,
+    action: Optional[str] = None
+):
+    """Get audit logs (admin only)"""
+    if not user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    conn = get_db()
+    if action:
+        logs = conn.execute("""
+            SELECT al.*, u.name as user_name, u.email as user_email
+            FROM audit_logs al
+            LEFT JOIN users u ON al.user_id = u.id
+            WHERE al.action = ?
+            ORDER BY al.created_at DESC
+            LIMIT ? OFFSET ?
+        """, (action, limit, offset)).fetchall()
+        total = conn.execute("SELECT COUNT(*) as c FROM audit_logs WHERE action = ?", (action,)).fetchone()["c"]
+    else:
+        logs = conn.execute("""
+            SELECT al.*, u.name as user_name, u.email as user_email
+            FROM audit_logs al
+            LEFT JOIN users u ON al.user_id = u.id
+            ORDER BY al.created_at DESC
+            LIMIT ? OFFSET ?
+        """, (limit, offset)).fetchall()
+        total = conn.execute("SELECT COUNT(*) as c FROM audit_logs").fetchone()["c"]
+
+    conn.close()
+    return {
+        "logs": [dict(l) for l in logs],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+# ==================== BRANDING ENDPOINTS ====================
+
+@app.post("/api/admin/branding")
+async def update_branding(request_data: dict = Body(...), user=Depends(get_current_user)):
+    """Update site branding (admin only)"""
+    if not user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    conn = get_db()
+    branding_keys = ["app_name", "app_tagline", "primary_color", "logo_url", "support_email", "custom_footer"]
+    for key in branding_keys:
+        if key in request_data:
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?",
+                (f"branding_{key}", str(request_data[key]), str(request_data[key]))
+            )
+    conn.commit()
+    conn.close()
+    log_audit(user["id"], "update_branding", f"Updated: {list(request_data.keys())}")
+    return {"message": "Branding updated"}
+
+
+@app.get("/api/branding")
+async def get_branding():
+    """Get site branding configuration (public)"""
+    conn = get_db()
+    rows = conn.execute("SELECT key, value FROM settings WHERE key LIKE 'branding_%'").fetchall()
+    conn.close()
+
+    branding = {}
+    for row in rows:
+        key = row["key"].replace("branding_", "")
+        branding[key] = row["value"]
+
+    # Defaults
+    defaults = {
+        "app_name": "Universal Document Creator",
+        "app_tagline": "AI-Powered Document Generation",
+        "primary_color": "#ea580c",
+        "logo_url": "",
+        "support_email": "support@universaldoc.app",
+        "custom_footer": "",
+    }
+
+    for k, v in defaults.items():
+        if k not in branding:
+            branding[k] = v
+
+    return branding
 
 
 # ==================== HEALTH CHECK ====================

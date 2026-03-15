@@ -444,6 +444,16 @@ export async function createCustomerPortal(): Promise<{ portal_url: string }> {
   return response.json();
 }
 
+// ==================== DASHBOARD API ====================
+
+export async function getDashboard(): Promise<any> {
+  const response = await fetch(`${API_BASE_URL}/api/user/dashboard`, {
+    headers: authHeaders(),
+  });
+  if (!response.ok) throw new Error('Failed to load dashboard');
+  return response.json();
+}
+
 // ==================== HEALTH API ====================
 
 export async function getHealthStatus(): Promise<any> {
