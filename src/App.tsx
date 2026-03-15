@@ -122,6 +122,9 @@ function AppContent() {
   const [generatedImage, setGeneratedImage] = useState<{ image_base64: string; mime_type: string; filename: string } | null>(null);
   const [isGeneratingImage, setIsGeneratingImage] = useState(false);
 
+  // Initial loading state
+  const [initialLoading, setInitialLoading] = useState(true);
+
   // Load skills and models
   useEffect(() => {
     loadInitialData();
@@ -148,6 +151,9 @@ function AppContent() {
       if (imageModelsData.default) setSelectedImageModel(imageModelsData.default);
     } catch (err) {
       console.error('Failed to load initial data', err);
+      toast.error('Failed to load app data. Please refresh.');
+    } finally {
+      setInitialLoading(false);
     }
   }
 
@@ -164,6 +170,7 @@ function AppContent() {
       setSavedDocs(docs);
     } catch (err) {
       console.error('Failed to load user data', err);
+      toast.error('Failed to load user data. Some features may be unavailable.');
     }
   }
 
@@ -252,7 +259,15 @@ function AppContent() {
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to generate document';
-      toast.error(message);
+      if (message.toLowerCase().includes('api key') || message.toLowerCase().includes('not configured')) {
+        toast.error('API key not configured. Open Settings to add your key.');
+      } else if (message.includes('429') || message.toLowerCase().includes('rate limit')) {
+        toast.error('Rate limit reached. Please wait a moment or upgrade your plan.');
+      } else if (message.toLowerCase().includes('timeout')) {
+        toast.error('Request timed out. Try a shorter prompt or different model.');
+      } else {
+        toast.error(message);
+      }
     } finally {
       setIsGenerating(false);
     }
@@ -801,6 +816,15 @@ function AppContent() {
       <main className="pt-20 pb-8 px-4 lg:px-6">
         <div className="max-w-7xl mx-auto">
 
+          {/* Initial Loading State */}
+          {initialLoading ? (
+            <div className="flex flex-col items-center justify-center py-32 text-muted-foreground">
+              <Loader2 className="w-10 h-10 animate-spin mb-4" />
+              <p className="text-sm font-medium">Loading...</p>
+            </div>
+          ) : (
+          <>
+
           {/* Mobile Mode Toggle */}
           <div className="sm:hidden flex items-center rounded-lg border bg-muted/50 p-0.5 mb-4">
             <button
@@ -1290,6 +1314,9 @@ function AppContent() {
               </Card>
             )}
           </div>
+          )}
+
+          </>
           )}
         </div>
       </main>

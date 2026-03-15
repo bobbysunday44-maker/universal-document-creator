@@ -279,11 +279,77 @@ def init_db():
             pass
     conn.commit()
 
+    # Add admin and rate limiting columns
+    try:
+        conn.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0")
+    except:
+        pass
+    try:
+        conn.execute("ALTER TABLE users ADD COLUMN generation_count INTEGER DEFAULT 0")
+    except:
+        pass
+    try:
+        conn.execute("ALTER TABLE users ADD COLUMN generation_reset TEXT")
+    except:
+        pass
+    conn.commit()
+
     conn.close()
 
 @app.on_event("startup")
 async def startup():
     init_db()
+
+# ==================== RATE LIMITING ====================
+
+def check_generation_limit(user: dict, conn) -> bool:
+    """Check if user can generate. Returns True if allowed, raises HTTPException if not."""
+    if not user:
+        return True  # Guest users not rate limited for now
+
+    # Admins and paid plans bypass limits
+    if user.get("is_admin") or user.get("plan") in ("pro", "enterprise"):
+        return True
+
+    user_id = user["id"]
+    row = conn.execute(
+        "SELECT generation_count, generation_reset FROM users WHERE id = ?",
+        (user_id,)
+    ).fetchone()
+
+    if not row:
+        return True
+
+    # Reset counter if month changed
+    now = datetime.utcnow()
+    reset_date = row["generation_reset"]
+    if reset_date:
+        try:
+            reset_dt = datetime.fromisoformat(reset_date)
+            if now.month != reset_dt.month or now.year != reset_dt.year:
+                conn.execute(
+                    "UPDATE users SET generation_count = 0, generation_reset = ? WHERE id = ?",
+                    (now.isoformat(), user_id)
+                )
+                conn.commit()
+                return True
+        except:
+            pass
+    else:
+        conn.execute(
+            "UPDATE users SET generation_reset = ? WHERE id = ?",
+            (now.isoformat(), user_id)
+        )
+        conn.commit()
+
+    count = row["generation_count"] or 0
+    if count >= 10:  # Free plan limit: 10 generations/month
+        raise HTTPException(
+            status_code=429,
+            detail="Free plan limit reached (10 generations/month). Upgrade to Pro for unlimited generations."
+        )
+
+    return True
 
 # ==================== AUTH HELPERS ====================
 
@@ -318,7 +384,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     payload = verify_token(credentials.credentials)
     user_id = payload.get("sub")
     conn = get_db()
-    user = conn.execute("SELECT id, email, name, plan, created_at FROM users WHERE id = ?", (user_id,)).fetchone()
+    user = conn.execute("SELECT id, email, name, plan, created_at, is_admin FROM users WHERE id = ?", (user_id,)).fetchone()
     conn.close()
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
@@ -331,7 +397,7 @@ async def get_optional_user(credentials: HTTPAuthorizationCredentials = Depends(
         payload = verify_token(credentials.credentials)
         user_id = payload.get("sub")
         conn = get_db()
-        user = conn.execute("SELECT id, email, name, plan, created_at FROM users WHERE id = ?", (user_id,)).fetchone()
+        user = conn.execute("SELECT id, email, name, plan, created_at, is_admin FROM users WHERE id = ?", (user_id,)).fetchone()
         conn.close()
         if user:
             return dict(user)
@@ -1669,6 +1735,13 @@ async def generate_document_stream(request: DocumentRequest, user=Depends(get_op
     """Stream document generation via SSE — real-time token-by-token output"""
     import json as json_module
 
+    # Check rate limit
+    conn = get_db()
+    try:
+        check_generation_limit(user, conn)
+    finally:
+        conn.close()
+
     # Build the prompt (same logic as generate_document)
     prompt = request.prompt
     skill_used = None
@@ -1823,6 +1896,16 @@ async def generate_document_stream(request: DocumentRequest, user=Depends(get_op
 
                 yield {"event": "done", "data": json_module.dumps({"full_text": full_text, "model_used": model_id, "skill_used": skill_used})}
 
+            # Increment generation count for free users after successful generation
+            if user and user.get("plan") == "free" and not user.get("is_admin"):
+                inc_conn = get_db()
+                inc_conn.execute(
+                    "UPDATE users SET generation_count = COALESCE(generation_count, 0) + 1 WHERE id = ?",
+                    (user["id"],)
+                )
+                inc_conn.commit()
+                inc_conn.close()
+
         except Exception as e:
             yield {"event": "error", "data": json_module.dumps({"error": str(e)})}
 
@@ -1832,6 +1915,13 @@ async def generate_document_stream(request: DocumentRequest, user=Depends(get_op
 @app.post("/api/generate", response_model=DocumentResponse)
 async def generate_document(request: DocumentRequest, user=Depends(get_optional_user)):
     """Generate a document with selected AI model"""
+    # Check rate limit
+    conn = get_db()
+    try:
+        check_generation_limit(user, conn)
+    finally:
+        conn.close()
+
     prompt = request.prompt
     skill_used = None
 
@@ -1951,6 +2041,16 @@ async def generate_document(request: DocumentRequest, user=Depends(get_optional_
             f.write(pdf_bytes)
     except Exception:
         pass  # Don't fail the response if auto-save has issues
+
+    # Increment generation count for free users
+    if user and user.get("plan") == "free" and not user.get("is_admin"):
+        conn = get_db()
+        conn.execute(
+            "UPDATE users SET generation_count = COALESCE(generation_count, 0) + 1 WHERE id = ?",
+            (user["id"],)
+        )
+        conn.commit()
+        conn.close()
 
     return DocumentResponse(
         content=content,
@@ -2221,6 +2321,57 @@ async def generate_image_endpoint(
     }
 
 
+# ==================== ADMIN & RATE LIMITS ====================
+
+@app.post("/api/admin/promote")
+async def promote_to_admin(request_data: dict = Body(...)):
+    """Promote a user to admin. Requires admin secret."""
+    admin_secret = os.getenv("ADMIN_SECRET", "universaldoc-admin-2026")
+
+    if request_data.get("secret") != admin_secret:
+        raise HTTPException(status_code=403, detail="Invalid admin secret")
+
+    email = request_data.get("email", "").strip()
+    if not email:
+        raise HTTPException(status_code=400, detail="Email required")
+
+    conn = get_db()
+    user = conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
+    if not user:
+        conn.close()
+        raise HTTPException(status_code=404, detail="User not found")
+
+    conn.execute("UPDATE users SET is_admin = 1, plan = 'enterprise' WHERE id = ?", (user["id"],))
+    conn.commit()
+    conn.close()
+
+    return {"message": f"User {email} promoted to admin with enterprise plan"}
+
+
+@app.get("/api/user/limits")
+async def get_user_limits(user=Depends(get_current_user)):
+    """Get current user's generation limits"""
+    conn = get_db()
+    row = conn.execute(
+        "SELECT plan, is_admin, generation_count, generation_reset FROM users WHERE id = ?",
+        (user["id"],)
+    ).fetchone()
+    conn.close()
+
+    if not row:
+        return {"plan": "free", "is_admin": False, "generations_used": 0, "generations_limit": 10, "unlimited": False}
+
+    is_unlimited = row["is_admin"] or row["plan"] in ("pro", "enterprise")
+
+    return {
+        "plan": row["plan"],
+        "is_admin": bool(row["is_admin"]),
+        "generations_used": row["generation_count"] or 0,
+        "generations_limit": None if is_unlimited else 10,
+        "unlimited": is_unlimited,
+    }
+
+
 # ==================== HEALTH CHECK ====================
 
 @app.get("/api/health")
@@ -2266,7 +2417,11 @@ if os.path.isdir(DIST_DIR):
 
     @app.get("/{full_path:path}")
     async def serve_spa(full_path: str):
-        """Serve the SPA — any non-API route returns index.html"""
+        """Serve the SPA — any non-API route returns index.html.
+        Unknown /api/ routes get a proper 404 JSON response."""
+        # Don't serve SPA for unknown API routes — return proper 404
+        if full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="API endpoint not found")
         file_path = os.path.join(DIST_DIR, full_path)
         if full_path and os.path.isfile(file_path):
             return FileResponse(file_path)

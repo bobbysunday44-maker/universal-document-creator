@@ -1,5 +1,8 @@
 import { FileText, Twitter, Linkedin, Mail, Github } from 'lucide-react';
 import { toast } from 'sonner';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { useState } from 'react';
+import { ScrollArea } from '@/components/ui/scroll-area';
 
 const footerLinks = {
   Product: ['Features', 'Templates', 'Pricing', 'API', 'Integrations'],
@@ -8,9 +11,109 @@ const footerLinks = {
   Legal: ['Privacy', 'Terms', 'Security', 'Cookies', 'Compliance'],
 };
 
+const legalContent: Record<string, { title: string; content: string }> = {
+  Privacy: {
+    title: 'Privacy Policy',
+    content: `Last updated: March 2026
+
+Universal Document Creator ("we", "us", "our") respects your privacy. This policy explains how we collect, use, and protect your information.
+
+**Information We Collect**
+- Account information (name, email) when you register
+- Documents you create (stored locally on your device)
+- Usage data (generation count, features used)
+
+**How We Use Your Information**
+- To provide and improve our services
+- To process payments (via Stripe — we never see your card details)
+- To send important account notifications
+
+**Data Storage**
+- All documents are stored locally on your device
+- We do not upload or store your documents on external servers
+- API keys are stored locally and encrypted
+
+**Third-Party Services**
+- Google Gemini API (for AI generation)
+- Anthropic Claude API (for AI generation)
+- Stripe (for payment processing)
+
+**Your Rights**
+- Access, update, or delete your account at any time
+- Export all your data
+- Opt out of non-essential communications
+
+**Contact**
+For privacy inquiries: privacy@universaldoc.app`
+  },
+  Terms: {
+    title: 'Terms of Service',
+    content: `Last updated: March 2026
+
+By using Universal Document Creator, you agree to these terms.
+
+**Service Description**
+Universal Document Creator is an AI-powered document generation tool. We provide templates, AI models, and export tools to help you create professional documents.
+
+**User Accounts**
+- You must provide accurate registration information
+- You are responsible for maintaining account security
+- One account per person
+
+**Acceptable Use**
+- Do not use the service to generate illegal, harmful, or deceptive content
+- Do not attempt to reverse engineer or exploit the service
+- Do not share API keys or account credentials
+
+**AI-Generated Content**
+- AI outputs may contain errors — always review before use
+- You own the documents you create
+- We do not claim ownership of your generated content
+
+**Payment & Subscriptions**
+- Free tier: 10 generations per month
+- Pro tier: $19/month, unlimited generations
+- Enterprise tier: $49/month, team features
+- Cancel anytime — no long-term contracts
+
+**Limitation of Liability**
+- The service is provided "as is"
+- We are not liable for AI output accuracy
+- Maximum liability is limited to fees paid in the last 12 months
+
+**Changes to Terms**
+We may update these terms. Continued use constitutes acceptance.
+
+**Contact**
+For legal inquiries: legal@universaldoc.app`
+  },
+  Security: {
+    title: 'Security',
+    content: `**Data Security**
+- All data is stored locally on your device
+- API communications use HTTPS encryption
+- Passwords are hashed with PBKDF2-SHA256
+- JWT tokens expire after 72 hours
+
+**API Key Security**
+- API keys are stored in your local database
+- Keys are never transmitted to our servers
+- Use environment variables for production deployments
+
+**Reporting Vulnerabilities**
+If you discover a security issue, please contact: security@universaldoc.app`
+  },
+};
+
 export function Footer() {
+  const [legalPage, setLegalPage] = useState<string | null>(null);
+
   const handleLinkClick = (link: string) => {
-    toast.info(`${link} page coming soon!`);
+    if (legalContent[link]) {
+      setLegalPage(link);
+    } else {
+      toast.info(`${link} page coming soon!`);
+    }
   };
 
   return (
@@ -86,13 +189,36 @@ export function Footer() {
         {/* Bottom */}
         <div className="border-t mt-8 sm:mt-12 pt-6 sm:pt-8 flex flex-col sm:flex-row items-center justify-between gap-3 sm:gap-4">
           <p className="text-xs sm:text-sm text-muted-foreground text-center sm:text-left">
-            © 2024 Universal Document Creator. All rights reserved.
+            © 2026 Universal Document Creator. All rights reserved.
           </p>
           <div className="flex items-center gap-2 sm:gap-4 text-xs sm:text-sm text-muted-foreground">
             <span>Made with ❤️ for professionals worldwide</span>
           </div>
         </div>
       </div>
+
+      <Dialog open={!!legalPage} onOpenChange={() => setLegalPage(null)}>
+        <DialogContent className="max-w-2xl max-h-[80vh]">
+          <DialogHeader>
+            <DialogTitle>{legalPage ? legalContent[legalPage]?.title : ''}</DialogTitle>
+          </DialogHeader>
+          <ScrollArea className="max-h-[60vh] pr-4">
+            <div className="prose prose-sm max-w-none">
+              {legalPage && legalContent[legalPage]?.content.split('\n\n').map((paragraph, i) => {
+                if (paragraph.startsWith('**') && paragraph.endsWith('**')) {
+                  return <h3 key={i} className="text-base font-semibold mt-4 mb-2">{paragraph.slice(2, -2)}</h3>;
+                } else if (paragraph.startsWith('**')) {
+                  const [title, ...rest] = paragraph.split('**').filter(Boolean);
+                  return <div key={i}><h3 className="text-base font-semibold mt-4 mb-1">{title}</h3><p className="text-sm text-muted-foreground">{rest.join('')}</p></div>;
+                } else if (paragraph.startsWith('- ')) {
+                  return <ul key={i} className="list-disc pl-5 space-y-1">{paragraph.split('\n').map((line, j) => <li key={j} className="text-sm text-muted-foreground">{line.replace('- ', '')}</li>)}</ul>;
+                }
+                return <p key={i} className="text-sm text-muted-foreground">{paragraph}</p>;
+              })}
+            </div>
+          </ScrollArea>
+        </DialogContent>
+      </Dialog>
     </footer>
   );
 }

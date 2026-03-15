@@ -293,14 +293,27 @@ export function DocumentEditor({
           </TabsList>
 
           <TabsContent value="edit" className="flex-1 m-0 p-4">
-            <Textarea
-              ref={textareaRef}
-              value={content}
-              onChange={(e) => onContentChange(e.target.value)}
-              placeholder="Your generated document will appear here..."
-              className="w-full h-full min-h-[400px] resize-none font-mono text-sm"
-              disabled={isGenerating}
-            />
+            {isGenerating && !content ? (
+              <div className="w-full h-full min-h-[400px] p-4 space-y-3">
+                <div className="h-6 bg-muted animate-pulse rounded w-3/4" />
+                <div className="h-4 bg-muted animate-pulse rounded w-full" />
+                <div className="h-4 bg-muted animate-pulse rounded w-5/6" />
+                <div className="h-4 bg-muted animate-pulse rounded w-full" />
+                <div className="h-4 bg-muted animate-pulse rounded w-2/3" />
+                <div className="h-6 bg-muted animate-pulse rounded w-1/2 mt-6" />
+                <div className="h-4 bg-muted animate-pulse rounded w-full" />
+                <div className="h-4 bg-muted animate-pulse rounded w-4/5" />
+              </div>
+            ) : (
+              <Textarea
+                ref={textareaRef}
+                value={content}
+                onChange={(e) => onContentChange(e.target.value)}
+                placeholder="Your generated document will appear here..."
+                className="w-full h-full min-h-[400px] resize-none font-mono text-sm"
+                disabled={isGenerating}
+              />
+            )}
           </TabsContent>
 
           <TabsContent value="preview" className="flex-1 m-0 p-4 overflow-auto">
