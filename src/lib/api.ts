@@ -319,6 +319,29 @@ export async function exportAsPdf(content: string, filename?: string, brandProfi
   URL.revokeObjectURL(url);
 }
 
+export async function exportAsDocx(content: string, filename?: string): Promise<void> {
+  const formData = new FormData();
+  formData.append('content', content);
+  if (filename) formData.append('filename', filename);
+
+  const response = await fetch(`${API_BASE_URL}/api/export/docx`, {
+    method: 'POST',
+    headers: authHeadersOnly(),
+    body: formData,
+  });
+  if (!response.ok) throw new Error('Failed to export DOCX');
+
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `${filename || 'document'}.docx`;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
 export async function exportDocument(
   format: string,
   content: string,
@@ -341,6 +364,59 @@ export async function getModels(): Promise<{ models: AIModel[]; default: string 
   if (!response.ok) throw new Error('Failed to fetch models');
   return response.json();
 }
+
+// ==================== IMAGE GENERATION API ====================
+
+export async function getImageModels(): Promise<{ models: any[]; default: string }> {
+  const response = await fetch(`${API_BASE_URL}/api/image-models`);
+  if (!response.ok) throw new Error('Failed to fetch image models');
+  return response.json();
+}
+
+export async function generateImage(prompt: string, model: string, aspectRatio: string = '1:1'): Promise<{ image_base64: string; mime_type: string; saved_to: string; filename: string }> {
+  const formData = new FormData();
+  formData.append('prompt', prompt);
+  formData.append('model', model);
+  formData.append('aspect_ratio', aspectRatio);
+  const response = await fetch(`${API_BASE_URL}/api/generate-image`, {
+    method: 'POST',
+    body: formData,
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ detail: 'Image generation failed' }));
+    throw new Error(err.detail || 'Image generation failed');
+  }
+  return response.json();
+}
+
+// ==================== STRIPE / BILLING API ====================
+
+export async function createCheckoutSession(planName: string): Promise<{ checkout_url: string; session_id: string }> {
+  const response = await fetch(`${API_BASE_URL}/api/stripe/create-checkout-session`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify({ plan: planName }),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ detail: 'Failed to create checkout session' }));
+    throw new Error(err.detail || 'Failed to create checkout session');
+  }
+  return response.json();
+}
+
+export async function createCustomerPortal(): Promise<{ portal_url: string }> {
+  const response = await fetch(`${API_BASE_URL}/api/stripe/customer-portal`, {
+    method: 'POST',
+    headers: authHeaders(),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ detail: 'Failed to open billing portal' }));
+    throw new Error(err.detail || 'Failed to open billing portal');
+  }
+  return response.json();
+}
+
+// ==================== HEALTH API ====================
 
 export async function getHealthStatus(): Promise<any> {
   const response = await fetch(`${API_BASE_URL}/api/health`);

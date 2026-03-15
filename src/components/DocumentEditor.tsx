@@ -51,6 +51,7 @@ export function DocumentEditor({
   const [isRefining, setIsRefining] = useState(false);
   const [refinementDialogOpen, setRefinementDialogOpen] = useState(false);
   const [exportingPdf, setExportingPdf] = useState(false);
+  const [exportingDocx, setExportingDocx] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const handleCopy = async () => {
@@ -65,6 +66,22 @@ export function DocumentEditor({
   };
 
   const handleExport = async (format: ExportFormat) => {
+    if (format === 'docx') {
+      try {
+        setExportingDocx(true);
+        toast.info('Generating DOCX...');
+        const { exportAsDocx } = await import('@/lib/api');
+        await exportAsDocx(content, 'document');
+        toast.success('DOCX downloaded');
+      } catch (err) {
+        toast.error('Failed to export DOCX');
+        console.error(err);
+      } finally {
+        setExportingDocx(false);
+      }
+      return;
+    }
+
     if (format === 'pdf') {
       try {
         setExportingPdf(true);
@@ -137,7 +154,7 @@ export function DocumentEditor({
   return (
     <Card className="flex flex-col h-full">
       <CardHeader className="pb-3 border-b">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <CardTitle className="text-lg flex items-center gap-2">
             <Edit3 className="w-5 h-5 text-primary" />
             Document Editor
@@ -147,7 +164,7 @@ export function DocumentEditor({
               </span>
             )}
           </CardTitle>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Button
               variant="outline"
               size="sm"
@@ -268,11 +285,11 @@ export function DocumentEditor({
 
       {content && (
         <div className="border-t p-4 bg-muted/30">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-wrap items-center justify-between gap-2">
             <span className="text-sm text-muted-foreground">
               {content.length} characters
             </span>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <span className="text-sm text-muted-foreground mr-2">Export as:</span>
               <Button
                 variant="outline"
@@ -289,6 +306,19 @@ export function DocumentEditor({
               >
                 <FileCode className="w-4 h-4 mr-1" />
                 MD
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => handleExport('docx')}
+                disabled={exportingDocx}
+              >
+                {exportingDocx ? (
+                  <RefreshCw className="w-4 h-4 mr-1 animate-spin" />
+                ) : (
+                  <FileDown className="w-4 h-4 mr-1" />
+                )}
+                DOCX
               </Button>
               <Button
                 variant="default"

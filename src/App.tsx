@@ -17,7 +17,8 @@ import type { Skill, AIModel } from '@/types';
 import {
   generateDocument, getSkills, getModels, saveApiKeys, getApiKeyStatus,
   uploadBrandScreenshot, getBrandProfiles, deleteBrandProfile,
-  getDocuments, getDocument, deleteDocument,
+  getDocuments, getDocument, deleteDocument, downloadDocumentPdf,
+  getImageModels, generateImage,
   type BrandProfile, type SavedDocument
 } from '@/lib/api';
 import { Button } from '@/components/ui/button';
@@ -64,6 +65,10 @@ import {
   ShieldOff,
   Image as ImageIcon,
   Loader2,
+  Download,
+  ChevronDown,
+  Search,
+  FileDown,
 } from 'lucide-react';
 
 // Main App Component
@@ -85,6 +90,7 @@ function AppContent() {
   const [temperature, setTemperature] = useState(0.7);
   const [maxTokens, setMaxTokens] = useState(4000);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [showMobileSidebar, setShowMobileSidebar] = useState(false);
 
   // Settings state
   const [geminiKey, setGeminiKey] = useState('');
@@ -101,6 +107,16 @@ function AppContent() {
   // Document history
   const [savedDocs, setSavedDocs] = useState<SavedDocument[]>([]);
   const [showHistory, setShowHistory] = useState(false);
+  const [historySearch, setHistorySearch] = useState('');
+
+  // Image generation
+  const [appMode, setAppMode] = useState<'document' | 'image'>('document');
+  const [imageModels, setImageModels] = useState<any[]>([]);
+  const [selectedImageModel, setSelectedImageModel] = useState('');
+  const [imagePrompt, setImagePrompt] = useState('');
+  const [imageAspectRatio, setImageAspectRatio] = useState('1:1');
+  const [generatedImage, setGeneratedImage] = useState<{ image_base64: string; mime_type: string; filename: string } | null>(null);
+  const [isGeneratingImage, setIsGeneratingImage] = useState(false);
 
   // Load skills and models
   useEffect(() => {
@@ -116,13 +132,16 @@ function AppContent() {
 
   async function loadInitialData() {
     try {
-      const [skillsData, modelsData] = await Promise.all([
+      const [skillsData, modelsData, imageModelsData] = await Promise.all([
         getSkills(),
         getModels(),
+        getImageModels().catch(() => ({ models: [], default: '' })),
       ]);
       setSkills(skillsData);
       setModels(modelsData.models);
       setSelectedModel(modelsData.default);
+      setImageModels(imageModelsData.models);
+      if (imageModelsData.default) setSelectedImageModel(imageModelsData.default);
     } catch (err) {
       console.error('Failed to load initial data', err);
     }
@@ -297,6 +316,40 @@ function AppContent() {
     toast.info('All fields cleared');
   };
 
+  const handleGenerateImage = async () => {
+    if (!imagePrompt.trim()) {
+      toast.error('Please enter an image prompt');
+      return;
+    }
+    try {
+      setIsGeneratingImage(true);
+      setGeneratedImage(null);
+      toast.info('Generating image...');
+      const result = await generateImage(imagePrompt, selectedImageModel, imageAspectRatio);
+      setGeneratedImage({
+        image_base64: result.image_base64,
+        mime_type: result.mime_type,
+        filename: result.filename,
+      });
+      toast.success('Image generated successfully!');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Image generation failed';
+      toast.error(message);
+    } finally {
+      setIsGeneratingImage(false);
+    }
+  };
+
+  const handleDownloadImage = () => {
+    if (!generatedImage) return;
+    const link = document.createElement('a');
+    link.href = `data:${generatedImage.mime_type};base64,${generatedImage.image_base64}`;
+    link.download = generatedImage.filename || 'generated-image.png';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   const currentModel = models.find(m => m.id === selectedModel);
 
   // Landing Page View
@@ -348,8 +401,34 @@ function AppContent() {
           </div>
 
           <div className="flex items-center gap-2">
+            {/* Mode Toggle */}
+            <div className="hidden sm:flex items-center rounded-lg border bg-muted/50 p-0.5">
+              <button
+                onClick={() => setAppMode('document')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+                  appMode === 'document'
+                    ? 'bg-background shadow-sm text-foreground'
+                    : 'text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                <FileText className="w-3.5 h-3.5" />
+                Document
+              </button>
+              <button
+                onClick={() => setAppMode('image')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+                  appMode === 'image'
+                    ? 'bg-background shadow-sm text-foreground'
+                    : 'text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                <ImageIcon className="w-3.5 h-3.5" />
+                Image
+              </button>
+            </div>
+
             {/* Model indicator */}
-            {currentModel && (
+            {currentModel && appMode === 'document' && (
               <Badge
                 variant={currentModel.censored ? "secondary" : "destructive"}
                 className="hidden sm:flex items-center gap-1 text-xs"
@@ -639,10 +718,55 @@ function AppContent() {
       {/* Main Content */}
       <main className="pt-20 pb-8 px-4 lg:px-6">
         <div className="max-w-7xl mx-auto">
+
+          {/* Mobile Mode Toggle */}
+          <div className="sm:hidden flex items-center rounded-lg border bg-muted/50 p-0.5 mb-4">
+            <button
+              onClick={() => setAppMode('document')}
+              className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-md text-sm font-medium transition-all ${
+                appMode === 'document'
+                  ? 'bg-background shadow-sm text-foreground'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              <FileText className="w-4 h-4" />
+              Document
+            </button>
+            <button
+              onClick={() => setAppMode('image')}
+              className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-md text-sm font-medium transition-all ${
+                appMode === 'image'
+                  ? 'bg-background shadow-sm text-foreground'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              <ImageIcon className="w-4 h-4" />
+              Image
+            </button>
+          </div>
+
+          {appMode === 'document' ? (
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
 
             {/* Left Sidebar - Configuration */}
-            <div className="lg:col-span-4 space-y-6">
+            <div className="lg:col-span-4 space-y-6 lg:block">
+              {/* Mobile toggle button - only visible on mobile */}
+              <div className="lg:hidden">
+                <Button
+                  variant="outline"
+                  className="w-full justify-between"
+                  onClick={() => setShowMobileSidebar(!showMobileSidebar)}
+                >
+                  <span className="flex items-center gap-2">
+                    <Settings className="w-4 h-4" />
+                    {selectedSkill ? selectedSkill.name : 'Configure Document'}
+                  </span>
+                  <ChevronDown className={`w-4 h-4 transition-transform ${showMobileSidebar ? 'rotate-180' : ''}`} />
+                </Button>
+              </div>
+
+              {/* Sidebar content - always visible on desktop, toggleable on mobile */}
+              <div className={`space-y-6 ${showMobileSidebar ? 'block' : 'hidden lg:block'}`}>
               {/* Model Quick Selector */}
               <Card>
                 <CardContent className="p-4 space-y-3">
@@ -734,56 +858,149 @@ function AppContent() {
                   </div>
                 </CardContent>
               </Card>
+              </div>
             </div>
 
             {/* Right Side - Editor */}
             <div className="lg:col-span-8 space-y-6">
               {/* Document History Panel */}
-              {showHistory && isAuthenticated && (
-                <Card>
-                  <CardContent className="p-4">
-                    <div className="flex items-center justify-between mb-3">
-                      <h3 className="text-sm font-medium flex items-center gap-2">
-                        <History className="w-4 h-4" />
-                        Document History ({savedDocs.length})
-                      </h3>
-                      <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => setShowHistory(false)}>
-                        <X className="w-4 h-4" />
-                      </Button>
-                    </div>
-                    {savedDocs.length === 0 ? (
-                      <p className="text-sm text-muted-foreground">No saved documents yet. Generated documents are auto-saved.</p>
-                    ) : (
-                      <div className="space-y-2 max-h-48 overflow-y-auto">
-                        {savedDocs.map((doc) => (
-                          <div key={doc.id} className="flex items-center justify-between p-2 rounded-lg hover:bg-muted/50 group">
-                            <button
-                              className="flex-1 text-left"
-                              onClick={() => handleLoadDocument(doc)}
-                            >
-                              <p className="text-sm font-medium truncate">{doc.title}</p>
-                              <p className="text-[11px] text-muted-foreground">
-                                {doc.model_used && <span className="mr-2">{doc.model_used}</span>}
-                                {new Date(doc.created_at).toLocaleDateString()}
-                              </p>
-                            </button>
-                            <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-7 w-7"
-                                onClick={() => handleDeleteDocument(doc.id)}
-                              >
-                                <Trash2 className="w-3 h-3" />
-                              </Button>
-                            </div>
-                          </div>
-                        ))}
+              {showHistory && isAuthenticated && (() => {
+                // Filter documents by search term
+                const filtered = savedDocs.filter(doc =>
+                  !historySearch.trim() ||
+                  doc.title.toLowerCase().includes(historySearch.toLowerCase()) ||
+                  (doc.skill_used && doc.skill_used.toLowerCase().includes(historySearch.toLowerCase())) ||
+                  (doc.model_used && doc.model_used.toLowerCase().includes(historySearch.toLowerCase()))
+                );
+
+                // Group documents by date
+                const now = new Date();
+                const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+                const yesterday = new Date(today.getTime() - 86400000);
+
+                const groups: { label: string; docs: SavedDocument[] }[] = [];
+                const todayDocs: SavedDocument[] = [];
+                const yesterdayDocs: SavedDocument[] = [];
+                const olderDocs: SavedDocument[] = [];
+
+                filtered.forEach(doc => {
+                  const docDate = new Date(doc.created_at);
+                  const docDay = new Date(docDate.getFullYear(), docDate.getMonth(), docDate.getDate());
+                  if (docDay.getTime() >= today.getTime()) {
+                    todayDocs.push(doc);
+                  } else if (docDay.getTime() >= yesterday.getTime()) {
+                    yesterdayDocs.push(doc);
+                  } else {
+                    olderDocs.push(doc);
+                  }
+                });
+
+                if (todayDocs.length > 0) groups.push({ label: 'Today', docs: todayDocs });
+                if (yesterdayDocs.length > 0) groups.push({ label: 'Yesterday', docs: yesterdayDocs });
+                if (olderDocs.length > 0) groups.push({ label: 'Older', docs: olderDocs });
+
+                return (
+                  <Card>
+                    <CardContent className="p-4">
+                      <div className="flex items-center justify-between mb-3">
+                        <h3 className="text-sm font-medium flex items-center gap-2">
+                          <History className="w-4 h-4" />
+                          Document History ({savedDocs.length})
+                        </h3>
+                        <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => setShowHistory(false)}>
+                          <X className="w-4 h-4" />
+                        </Button>
                       </div>
-                    )}
-                  </CardContent>
-                </Card>
-              )}
+
+                      {/* Search filter */}
+                      <div className="relative mb-3">
+                        <Search className="w-4 h-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                        <Input
+                          placeholder="Search documents..."
+                          value={historySearch}
+                          onChange={(e) => setHistorySearch(e.target.value)}
+                          className="pl-8 h-8 text-sm"
+                        />
+                      </div>
+
+                      {savedDocs.length === 0 ? (
+                        <p className="text-sm text-muted-foreground">No saved documents yet. Generated documents are auto-saved.</p>
+                      ) : filtered.length === 0 ? (
+                        <p className="text-sm text-muted-foreground">No documents matching "{historySearch}"</p>
+                      ) : (
+                        <div className="space-y-3 max-h-96 overflow-y-auto pr-1">
+                          {groups.map((group) => (
+                            <div key={group.label}>
+                              <p className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider mb-1.5 px-1">
+                                {group.label}
+                              </p>
+                              <div className="space-y-1">
+                                {group.docs.map((doc) => (
+                                  <div key={doc.id} className="flex items-start justify-between p-2.5 rounded-lg hover:bg-muted/50 group border border-transparent hover:border-border transition-colors">
+                                    <button
+                                      className="flex-1 text-left min-w-0"
+                                      onClick={() => handleLoadDocument(doc)}
+                                    >
+                                      <p className="text-sm font-medium truncate">{doc.title}</p>
+                                      {doc.content && (
+                                        <p className="text-[11px] text-muted-foreground truncate mt-0.5">
+                                          {doc.content.slice(0, 100).replace(/[#*\n]/g, ' ').trim()}
+                                        </p>
+                                      )}
+                                      <div className="flex items-center gap-2 mt-1">
+                                        {doc.model_used && (
+                                          <Badge variant="secondary" className="text-[9px] px-1 py-0 h-4">
+                                            {doc.model_used}
+                                          </Badge>
+                                        )}
+                                        {doc.skill_used && (
+                                          <Badge variant="outline" className="text-[9px] px-1 py-0 h-4">
+                                            {doc.skill_used}
+                                          </Badge>
+                                        )}
+                                        <span className="text-[10px] text-muted-foreground">
+                                          {new Date(doc.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                        </span>
+                                      </div>
+                                    </button>
+                                    <div className="flex gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity ml-2 shrink-0">
+                                      <Button
+                                        variant="ghost"
+                                        size="icon"
+                                        className="h-7 w-7"
+                                        title="Download PDF"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          downloadDocumentPdf(doc.id, doc.title).then(() => {
+                                            toast.success('PDF downloaded');
+                                          }).catch(() => {
+                                            toast.error('Failed to download PDF');
+                                          });
+                                        }}
+                                      >
+                                        <FileDown className="w-3 h-3" />
+                                      </Button>
+                                      <Button
+                                        variant="ghost"
+                                        size="icon"
+                                        className="h-7 w-7 text-destructive/70 hover:text-destructive"
+                                        title="Delete"
+                                        onClick={() => handleDeleteDocument(doc.id)}
+                                      >
+                                        <Trash2 className="w-3 h-3" />
+                                      </Button>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </CardContent>
+                  </Card>
+                );
+              })()}
 
               <div className="space-y-3">
                 <Label htmlFor="prompt" className="flex items-center gap-2">
@@ -798,7 +1015,7 @@ function AppContent() {
                   rows={4}
                   className="resize-none"
                 />
-                <div className="flex items-center justify-between">
+                <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
                     <p className="text-xs text-muted-foreground">
                       {selectedSkill
@@ -812,7 +1029,7 @@ function AppContent() {
                       </Badge>
                     )}
                   </div>
-                  <div className="flex gap-2">
+                  <div className="flex flex-wrap gap-2">
                     <Button
                       variant="outline"
                       size="sm"
@@ -853,6 +1070,145 @@ function AppContent() {
               />
             </div>
           </div>
+          ) : (
+          /* ==================== IMAGE GENERATION MODE ==================== */
+          <div className="max-w-3xl mx-auto space-y-6">
+            {/* Image Model & Settings */}
+            <Card>
+              <CardContent className="p-4 space-y-4">
+                <div className="flex items-center gap-2 mb-1">
+                  <ImageIcon className="w-5 h-5 text-primary" />
+                  <h2 className="text-lg font-semibold">Image Generation</h2>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  {/* Image Model Selector */}
+                  <div className="space-y-2">
+                    <Label className="text-sm font-medium">Model</Label>
+                    <Select value={selectedImageModel} onValueChange={setSelectedImageModel}>
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select image model" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {imageModels.map((m: any) => (
+                          <SelectItem key={m.id || m.name || m} value={m.id || m.name || m}>
+                            {m.name || m.id || m}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  {/* Aspect Ratio Selector */}
+                  <div className="space-y-2">
+                    <Label className="text-sm font-medium">Aspect Ratio</Label>
+                    <Select value={imageAspectRatio} onValueChange={setImageAspectRatio}>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="1:1">1:1 (Square)</SelectItem>
+                        <SelectItem value="16:9">16:9 (Landscape)</SelectItem>
+                        <SelectItem value="9:16">9:16 (Portrait)</SelectItem>
+                        <SelectItem value="4:3">4:3 (Standard)</SelectItem>
+                        <SelectItem value="3:4">3:4 (Portrait Standard)</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Prompt & Generate */}
+            <Card>
+              <CardContent className="p-4 space-y-3">
+                <Label htmlFor="image-prompt" className="flex items-center gap-2">
+                  <Sparkles className="w-4 h-4 text-primary" />
+                  Image Prompt
+                </Label>
+                <Textarea
+                  id="image-prompt"
+                  placeholder="Describe the image you want to generate..."
+                  value={imagePrompt}
+                  onChange={(e) => setImagePrompt(e.target.value)}
+                  rows={4}
+                  className="resize-none"
+                />
+                <div className="flex items-center justify-between">
+                  <p className="text-xs text-muted-foreground">
+                    {selectedImageModel ? `Using ${selectedImageModel}` : 'Select a model above'}
+                    {' \u00B7 '}{imageAspectRatio}
+                  </p>
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => { setImagePrompt(''); setGeneratedImage(null); }}
+                    >
+                      <Trash2 className="w-4 h-4 mr-2" />
+                      Clear
+                    </Button>
+                    <Button
+                      onClick={handleGenerateImage}
+                      disabled={isGeneratingImage || !imagePrompt.trim() || !selectedImageModel}
+                      size="sm"
+                    >
+                      {isGeneratingImage ? (
+                        <>
+                          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                          Generating...
+                        </>
+                      ) : (
+                        <>
+                          <Wand2 className="w-4 h-4 mr-2" />
+                          Generate Image
+                        </>
+                      )}
+                    </Button>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Loading State */}
+            {isGeneratingImage && !generatedImage && (
+              <Card>
+                <CardContent className="p-8 flex flex-col items-center justify-center text-muted-foreground">
+                  <Loader2 className="w-10 h-10 animate-spin mb-3" />
+                  <p className="text-sm">Generating your image...</p>
+                </CardContent>
+              </Card>
+            )}
+
+            {/* Generated Image Preview */}
+            {generatedImage && (
+              <Card>
+                <CardContent className="p-4 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-sm font-medium flex items-center gap-2">
+                      <ImageIcon className="w-4 h-4" />
+                      Generated Image
+                    </h3>
+                    <Button size="sm" variant="outline" onClick={handleDownloadImage}>
+                      <Download className="w-4 h-4 mr-2" />
+                      Download
+                    </Button>
+                  </div>
+                  <div className="rounded-lg overflow-hidden border bg-muted/30">
+                    <img
+                      src={`data:${generatedImage.mime_type};base64,${generatedImage.image_base64}`}
+                      alt="Generated image"
+                      className="w-full h-auto"
+                    />
+                  </div>
+                  <p className="text-xs text-muted-foreground text-center">
+                    {generatedImage.filename}
+                  </p>
+                </CardContent>
+              </Card>
+            )}
+          </div>
+          )}
         </div>
       </main>
 

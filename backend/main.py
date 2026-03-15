@@ -9,7 +9,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import Response, FileResponse, HTMLResponse
@@ -25,6 +25,7 @@ import sqlite3
 import hashlib
 import secrets
 import jwt
+import stripe
 from datetime import datetime, timedelta
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
@@ -75,6 +76,16 @@ JWT_EXPIRY_HOURS = 72
 # API Keys (loaded from environment or set via settings endpoint)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+
+# Stripe
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+
+# Stripe price mapping (plan_name -> monthly price in cents)
+STRIPE_PLAN_PRICES = {
+    "pro": 1900,        # $19/mo
+    "enterprise": 4900,  # $49/mo
+}
 
 # Ensure directories exist
 os.makedirs(UPLOADED_SKILLS_DIR, exist_ok=True)
@@ -245,6 +256,14 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_brand_profiles_user_id ON brand_profiles(user_id);
     """)
     conn.commit()
+
+    # Migration: add stripe_customer_id column if missing
+    cursor = conn.execute("PRAGMA table_info(users)")
+    columns = [row[1] for row in cursor.fetchall()]
+    if "stripe_customer_id" not in columns:
+        conn.execute("ALTER TABLE users ADD COLUMN stripe_customer_id TEXT")
+        conn.commit()
+
     conn.close()
 
 @app.on_event("startup")
@@ -381,6 +400,13 @@ class BrandProfileRequest(BaseModel):
 class ApiKeyUpdate(BaseModel):
     gemini_api_key: Optional[str] = None
     anthropic_api_key: Optional[str] = None
+
+class StripeCheckoutRequest(BaseModel):
+    plan_name: str  # "pro" or "enterprise"
+
+class StripeKeyUpdate(BaseModel):
+    stripe_secret_key: Optional[str] = None
+    stripe_webhook_secret: Optional[str] = None
 
 # ==================== AI GENERATION ENGINE ====================
 
@@ -1086,6 +1112,205 @@ async def get_api_keys(user=Depends(get_current_user)):
         "anthropic_configured": bool(anthropic) or bool(ANTHROPIC_API_KEY),
     }
 
+# ==================== STRIPE SETTINGS ====================
+
+@app.post("/api/settings/stripe-key")
+async def update_stripe_keys(req: StripeKeyUpdate, user=Depends(get_current_user)):
+    """Save Stripe keys to database (admin-style, any authenticated user)"""
+    conn = get_db()
+    if req.stripe_secret_key is not None:
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('stripe_secret_key', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = ?",
+            (req.stripe_secret_key, req.stripe_secret_key)
+        )
+        global STRIPE_SECRET_KEY
+        STRIPE_SECRET_KEY = req.stripe_secret_key
+    if req.stripe_webhook_secret is not None:
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('stripe_webhook_secret', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = ?",
+            (req.stripe_webhook_secret, req.stripe_webhook_secret)
+        )
+        global STRIPE_WEBHOOK_SECRET
+        STRIPE_WEBHOOK_SECRET = req.stripe_webhook_secret
+    conn.commit()
+    conn.close()
+    return {"message": "Stripe keys updated"}
+
+@app.get("/api/settings/stripe-key")
+async def get_stripe_key_status(user=Depends(get_current_user)):
+    """Check if Stripe keys are configured"""
+    conn = get_db()
+    sk = conn.execute("SELECT value FROM settings WHERE key = 'stripe_secret_key'").fetchone()
+    wh = conn.execute("SELECT value FROM settings WHERE key = 'stripe_webhook_secret'").fetchone()
+    conn.close()
+    return {
+        "stripe_configured": bool(sk) or bool(STRIPE_SECRET_KEY),
+        "webhook_configured": bool(wh) or bool(STRIPE_WEBHOOK_SECRET),
+    }
+
+# ==================== STRIPE PAYMENT ENDPOINTS ====================
+
+def _get_stripe_key() -> str:
+    """Get Stripe secret key from env or DB"""
+    if STRIPE_SECRET_KEY:
+        return STRIPE_SECRET_KEY
+    conn = get_db()
+    row = conn.execute("SELECT value FROM settings WHERE key = 'stripe_secret_key'").fetchone()
+    conn.close()
+    return row["value"] if row else ""
+
+def _get_webhook_secret() -> str:
+    """Get Stripe webhook secret from env or DB"""
+    if STRIPE_WEBHOOK_SECRET:
+        return STRIPE_WEBHOOK_SECRET
+    conn = get_db()
+    row = conn.execute("SELECT value FROM settings WHERE key = 'stripe_webhook_secret'").fetchone()
+    conn.close()
+    return row["value"] if row else ""
+
+@app.post("/api/stripe/create-checkout-session")
+async def create_checkout_session(req: StripeCheckoutRequest, user=Depends(get_current_user)):
+    """Create a Stripe Checkout session for Pro or Enterprise plan"""
+    sk = _get_stripe_key()
+    if not sk:
+        raise HTTPException(status_code=400, detail="Stripe not configured. Add your Stripe secret key in Settings.")
+
+    plan = req.plan_name.lower()
+    if plan not in STRIPE_PLAN_PRICES:
+        raise HTTPException(status_code=400, detail=f"Invalid plan: {plan}. Choose 'pro' or 'enterprise'.")
+
+    stripe.api_key = sk
+
+    try:
+        # Check if user already has a Stripe customer ID
+        conn = get_db()
+        db_user = conn.execute("SELECT stripe_customer_id FROM users WHERE id = ?", (user["id"],)).fetchone()
+        customer_id = db_user["stripe_customer_id"] if db_user and db_user["stripe_customer_id"] else None
+        conn.close()
+
+        # Create or reuse Stripe customer
+        if not customer_id:
+            customer = stripe.Customer.create(
+                email=user["email"],
+                name=user.get("name", ""),
+                metadata={"user_id": str(user["id"])}
+            )
+            customer_id = customer.id
+            conn = get_db()
+            conn.execute("UPDATE users SET stripe_customer_id = ? WHERE id = ?", (customer_id, user["id"]))
+            conn.commit()
+            conn.close()
+
+        # Create checkout session
+        session = stripe.checkout.Session.create(
+            customer=customer_id,
+            payment_method_types=["card"],
+            mode="subscription",
+            line_items=[{
+                "price_data": {
+                    "currency": "usd",
+                    "recurring": {"interval": "month"},
+                    "product_data": {"name": f"Universal Document Creator — {plan.title()} Plan"},
+                    "unit_amount": STRIPE_PLAN_PRICES[plan],
+                },
+                "quantity": 1,
+            }],
+            metadata={"user_id": str(user["id"]), "plan_name": plan},
+            success_url=os.getenv("STRIPE_SUCCESS_URL", "http://localhost:5173/dashboard?payment=success"),
+            cancel_url=os.getenv("STRIPE_CANCEL_URL", "http://localhost:5173/pricing?payment=cancelled"),
+        )
+
+        return {"url": session.url, "session_id": session.id}
+
+    except stripe.error.StripeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/api/stripe/webhook")
+async def stripe_webhook(request: Request):
+    """Handle Stripe webhook events (checkout.session.completed -> update user plan)"""
+    wh_secret = _get_webhook_secret()
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature", "")
+
+    sk = _get_stripe_key()
+    if not sk:
+        raise HTTPException(status_code=400, detail="Stripe not configured")
+    stripe.api_key = sk
+
+    # Verify webhook signature if secret is set
+    if wh_secret:
+        try:
+            event = stripe.Webhook.construct_event(payload, sig_header, wh_secret)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid payload")
+        except stripe.error.SignatureVerificationError:
+            raise HTTPException(status_code=400, detail="Invalid signature")
+    else:
+        # No webhook secret — parse raw (dev/testing only)
+        try:
+            event = json.loads(payload)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid JSON payload")
+
+    # Handle checkout completed
+    if event.get("type") == "checkout.session.completed":
+        session_data = event["data"]["object"]
+        user_id = session_data.get("metadata", {}).get("user_id")
+        plan_name = session_data.get("metadata", {}).get("plan_name")
+        customer_id = session_data.get("customer")
+
+        if user_id and plan_name:
+            conn = get_db()
+            conn.execute(
+                "UPDATE users SET plan = ?, stripe_customer_id = ?, updated_at = datetime('now') WHERE id = ?",
+                (plan_name, customer_id, int(user_id))
+            )
+            conn.commit()
+            conn.close()
+
+    # Handle subscription deleted (downgrade to free)
+    elif event.get("type") == "customer.subscription.deleted":
+        sub = event["data"]["object"]
+        customer_id = sub.get("customer")
+        if customer_id:
+            conn = get_db()
+            conn.execute(
+                "UPDATE users SET plan = 'free', updated_at = datetime('now') WHERE stripe_customer_id = ?",
+                (customer_id,)
+            )
+            conn.commit()
+            conn.close()
+
+    return {"status": "ok"}
+
+@app.post("/api/stripe/customer-portal")
+async def create_customer_portal(user=Depends(get_current_user)):
+    """Create a Stripe Billing Portal session for subscription management"""
+    sk = _get_stripe_key()
+    if not sk:
+        raise HTTPException(status_code=400, detail="Stripe not configured. Add your Stripe secret key in Settings.")
+
+    stripe.api_key = sk
+
+    # Get user's Stripe customer ID
+    conn = get_db()
+    db_user = conn.execute("SELECT stripe_customer_id FROM users WHERE id = ?", (user["id"],)).fetchone()
+    conn.close()
+
+    if not db_user or not db_user["stripe_customer_id"]:
+        raise HTTPException(status_code=400, detail="No billing account found. Subscribe to a plan first.")
+
+    try:
+        portal_session = stripe.billing_portal.Session.create(
+            customer=db_user["stripe_customer_id"],
+            return_url=os.getenv("STRIPE_PORTAL_RETURN_URL", "http://localhost:5173/dashboard"),
+        )
+        return {"url": portal_session.url}
+    except stripe.error.StripeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
 # ==================== BRAND PROFILE ENDPOINTS ====================
 
 @app.post("/api/brand/upload-screenshot")
@@ -1580,6 +1805,52 @@ async def export_as_pdf(
         content=pdf_bytes,
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{base_filename}.pdf"'}
+    )
+
+@app.post("/api/export/docx")
+async def export_docx(
+    content: str = Form(...),
+    filename: Optional[str] = Form(None),
+    user=Depends(get_optional_user)
+):
+    """Export document as DOCX"""
+    from docx import Document as DocxDocument
+    from docx.shared import Pt, Inches
+    import io
+
+    doc = DocxDocument()
+    # Parse markdown-like content
+    for line in content.split('\n'):
+        line = line.strip()
+        if line.startswith('# '):
+            doc.add_heading(line[2:], level=1)
+        elif line.startswith('## '):
+            doc.add_heading(line[3:], level=2)
+        elif line.startswith('### '):
+            doc.add_heading(line[4:], level=3)
+        elif line.startswith('- ') or line.startswith('* '):
+            doc.add_paragraph(line[2:], style='List Bullet')
+        elif line:
+            # Handle bold text **text**
+            clean = re.sub(r'\*\*(.*?)\*\*', r'\1', line)
+            doc.add_paragraph(clean)
+
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+
+    base_filename = filename or f"document_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+
+    # Auto-save copy to output folder
+    save_path = os.path.join(OUTPUT_DIR, f"{base_filename}.docx")
+    with open(save_path, "wb") as f:
+        f.write(buffer.getvalue())
+    buffer.seek(0)
+
+    return Response(
+        content=buffer.read(),
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="{base_filename}.docx"'}
     )
 
 @app.post("/api/export/{format}")

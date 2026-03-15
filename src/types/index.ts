@@ -56,4 +56,4 @@ export interface ChainStep {
   parameters: Record<string, any>;
 }
 
-export type ExportFormat = 'text' | 'markdown' | 'html' | 'pdf';
+export type ExportFormat = 'text' | 'markdown' | 'html' | 'pdf' | 'docx';

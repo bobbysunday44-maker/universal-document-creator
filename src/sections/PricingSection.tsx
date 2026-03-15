@@ -1,8 +1,10 @@
 import { motion, useInView } from 'framer-motion';
 import { useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
-import { Check, Sparkles, Zap, Crown, ArrowRight } from 'lucide-react';
+import { Check, Sparkles, Zap, Crown, ArrowRight, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
+import { useAuth } from '@/contexts/AuthContext';
+import { createCheckoutSession, createCustomerPortal } from '@/lib/api';
 
 const plans = [
   {
@@ -66,14 +68,48 @@ export function PricingSection() {
   const ref = useRef(null);
   const isInView = useInView(ref, { once: true, margin: '-50px' });
   const [hoveredPlan, setHoveredPlan] = useState<string | null>(null);
+  const [loadingPlan, setLoadingPlan] = useState<string | null>(null);
+  const { user, isAuthenticated } = useAuth();
 
-  const handlePlanClick = (planName: string) => {
+  const handlePlanClick = async (planName: string) => {
     if (planName === 'Enterprise') {
       toast.info('Contact sales coming soon!');
-    } else if (planName === 'Pro') {
-      toast.success('Starting your free trial!');
-    } else {
+      return;
+    }
+
+    if (planName === 'Free') {
       toast.success('Welcome to Universal Doc!');
+      return;
+    }
+
+    // Pro plan
+    if (!isAuthenticated) {
+      toast.error('Please sign in first');
+      return;
+    }
+
+    // Already on this plan — open billing portal instead
+    if (user?.plan === 'pro' || user?.plan === 'enterprise') {
+      try {
+        setLoadingPlan(planName);
+        const { portal_url } = await createCustomerPortal();
+        window.location.href = portal_url;
+      } catch (err: any) {
+        toast.error(err.message || 'Failed to open billing portal');
+      } finally {
+        setLoadingPlan(null);
+      }
+      return;
+    }
+
+    try {
+      setLoadingPlan(planName);
+      const { checkout_url } = await createCheckoutSession('pro');
+      window.location.href = checkout_url;
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to create checkout session');
+    } finally {
+      setLoadingPlan(null);
     }
   };
 
@@ -169,10 +205,22 @@ export function PricingSection() {
                   variant={plan.variant}
                   className="w-full gap-2 text-sm sm:text-base"
                   size="lg"
+                  disabled={loadingPlan === plan.name}
                   onClick={() => handlePlanClick(plan.name)}
                 >
-                  {plan.cta}
-                  <ArrowRight className="w-4 h-4" />
+                  {loadingPlan === plan.name ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      Processing...
+                    </>
+                  ) : (
+                    <>
+                      {plan.name === 'Pro' && isAuthenticated && (user?.plan === 'pro' || user?.plan === 'enterprise')
+                        ? 'Manage Subscription'
+                        : plan.cta}
+                      <ArrowRight className="w-4 h-4" />
+                    </>
+                  )}
                 </Button>
               </div>
             </motion.div>
