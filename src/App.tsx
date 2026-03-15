@@ -15,7 +15,7 @@ import { DocumentEditor } from '@/components/DocumentEditor';
 import { SkillUploader } from '@/components/SkillUploader';
 import type { Skill, AIModel } from '@/types';
 import {
-  generateDocument, getSkills, getModels, saveApiKeys, getApiKeyStatus,
+  generateDocument, generateDocumentStream, getSkills, getModels, saveApiKeys, getApiKeyStatus,
   uploadBrandScreenshot, getBrandProfiles, deleteBrandProfile,
   getDocuments, getDocument, deleteDocument, downloadDocumentPdf,
   getImageModels, generateImage,
@@ -97,6 +97,10 @@ function AppContent() {
   const [showGeminiKey, setShowGeminiKey] = useState(false);
   const [geminiConfigured, setGeminiConfigured] = useState(false);
   const [savingKey, setSavingKey] = useState(false);
+  const [anthropicKey, setAnthropicKey] = useState('');
+  const [showAnthropicKey, setShowAnthropicKey] = useState(false);
+  const [anthropicConfigured, setAnthropicConfigured] = useState(false);
+  const [savingAnthropicKey, setSavingAnthropicKey] = useState(false);
 
   // Brand profiles
   const [brandProfiles, setBrandProfiles] = useState<BrandProfile[]>([]);
@@ -150,11 +154,12 @@ function AppContent() {
   async function loadUserData() {
     try {
       const [keyStatus, profiles, docs] = await Promise.all([
-        getApiKeyStatus().catch(() => ({ gemini_configured: false })),
+        getApiKeyStatus().catch(() => ({ gemini_configured: false, anthropic_configured: false })),
         getBrandProfiles().catch(() => []),
         getDocuments().catch(() => []),
       ]);
       setGeminiConfigured(keyStatus.gemini_configured);
+      setAnthropicConfigured(keyStatus.anthropic_configured || false);
       setBrandProfiles(profiles);
       setSavedDocs(docs);
     } catch (err) {
@@ -198,33 +203,56 @@ function AppContent() {
       return;
     }
 
+    const request = {
+      skill_name: selectedSkill?.name,
+      prompt,
+      parameters,
+      model: selectedModel,
+      temperature,
+      max_tokens: maxTokens,
+      brand_profile_id: selectedBrandId,
+    };
+
     try {
       setIsGenerating(true);
+      setGeneratedContent(''); // Clear previous content
       toast.info('Generating document...');
 
-      const request = {
-        skill_name: selectedSkill?.name,
-        prompt,
-        parameters,
-        model: selectedModel,
-        temperature,
-        max_tokens: maxTokens,
-        brand_profile_id: selectedBrandId,
-      };
-
-      const result = await generateDocument(request);
-      setGeneratedContent(result.content);
-      setSkillUsed(result.skill_used);
-      toast.success(`Document generated with ${result.model_used}`);
-
-      // Refresh document history
-      if (isAuthenticated) {
-        getDocuments().then(setSavedDocs).catch(() => {});
+      // Try streaming first
+      try {
+        await generateDocumentStream(
+          request,
+          (text) => {
+            // Append each token as it arrives
+            setGeneratedContent(prev => prev + text);
+          },
+          (result) => {
+            // Done — set final content and metadata
+            setGeneratedContent(result.full_text);
+            setSkillUsed(result.skill_used || undefined);
+            toast.success(`Document generated with ${result.model_used}`);
+            // Refresh document history
+            if (isAuthenticated) {
+              getDocuments().then(setSavedDocs).catch(() => {});
+            }
+          },
+          (error) => {
+            toast.error(`Generation error: ${error}`);
+          }
+        );
+      } catch {
+        // Fallback to non-streaming if SSE fails
+        const result = await generateDocument(request);
+        setGeneratedContent(result.content);
+        setSkillUsed(result.skill_used);
+        toast.success(`Document generated with ${result.model_used}`);
+        if (isAuthenticated) {
+          getDocuments().then(setSavedDocs).catch(() => {});
+        }
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to generate document';
       toast.error(message);
-      console.error(err);
     } finally {
       setIsGenerating(false);
     }
@@ -242,6 +270,21 @@ function AppContent() {
       toast.error('Failed to save API key');
     } finally {
       setSavingKey(false);
+    }
+  };
+
+  const handleSaveAnthropicKey = async () => {
+    if (!anthropicKey.trim()) return;
+    try {
+      setSavingAnthropicKey(true);
+      await saveApiKeys({ anthropic_api_key: anthropicKey });
+      setAnthropicConfigured(true);
+      setAnthropicKey('');
+      toast.success('Anthropic API key saved');
+    } catch (err) {
+      toast.error('Failed to save API key');
+    } finally {
+      setSavingAnthropicKey(false);
     }
   };
 
@@ -558,6 +601,45 @@ function AppContent() {
                         </div>
                         <p className="text-xs text-muted-foreground">
                           Free from Google AI Studio. Required for Gemini 3 Flash.
+                        </p>
+                      </div>
+
+                      <Separator />
+
+                      {/* Anthropic API Key */}
+                      <div className="space-y-3">
+                        <Label className="flex items-center gap-2">
+                          <Key className="w-4 h-4" />
+                          Anthropic API Key
+                          {anthropicConfigured && (
+                            <Badge variant="outline" className="text-[10px] px-1.5 py-0 text-green-600 border-green-300">
+                              <Check className="w-2.5 h-2.5 mr-0.5" />
+                              Configured
+                            </Badge>
+                          )}
+                        </Label>
+                        <div className="flex gap-2">
+                          <div className="relative flex-1">
+                            <Input
+                              type={showAnthropicKey ? "text" : "password"}
+                              placeholder={anthropicConfigured ? "Key saved — enter new to update" : "Paste your Anthropic API key"}
+                              value={anthropicKey}
+                              onChange={(e) => setAnthropicKey(e.target.value)}
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setShowAnthropicKey(!showAnthropicKey)}
+                              className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground"
+                            >
+                              {showAnthropicKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                            </button>
+                          </div>
+                          <Button size="sm" onClick={handleSaveAnthropicKey} disabled={!anthropicKey.trim() || savingAnthropicKey}>
+                            {savingAnthropicKey ? <Loader2 className="w-4 h-4 animate-spin" /> : "Save"}
+                          </Button>
+                        </div>
+                        <p className="text-xs text-muted-foreground">
+                          Required for Claude Sonnet 4 and Haiku 4.5 models.
                         </p>
                       </div>
 

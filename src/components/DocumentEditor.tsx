@@ -52,6 +52,7 @@ export function DocumentEditor({
   const [refinementDialogOpen, setRefinementDialogOpen] = useState(false);
   const [exportingPdf, setExportingPdf] = useState(false);
   const [exportingDocx, setExportingDocx] = useState(false);
+  const [exportingHtml, setExportingHtml] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const handleCopy = async () => {
@@ -78,6 +79,37 @@ export function DocumentEditor({
         console.error(err);
       } finally {
         setExportingDocx(false);
+      }
+      return;
+    }
+
+    if (format === 'html') {
+      try {
+        setExportingHtml(true);
+        toast.info('Generating HTML...');
+        const formData = new FormData();
+        formData.append('content', content);
+        formData.append('filename', 'document');
+        const response = await fetch(`${import.meta.env.DEV ? 'http://localhost:8001' : ''}/api/export/html`, {
+          method: 'POST',
+          body: formData,
+        });
+        if (!response.ok) throw new Error('Failed');
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = 'document.html';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+        toast.success('HTML downloaded');
+      } catch (err) {
+        toast.error('Failed to export HTML');
+        console.error(err);
+      } finally {
+        setExportingHtml(false);
       }
       return;
     }
@@ -306,6 +338,19 @@ export function DocumentEditor({
               >
                 <FileCode className="w-4 h-4 mr-1" />
                 MD
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => handleExport('html')}
+                disabled={exportingHtml}
+              >
+                {exportingHtml ? (
+                  <RefreshCw className="w-4 h-4 mr-1 animate-spin" />
+                ) : (
+                  <FileCode className="w-4 h-4 mr-1" />
+                )}
+                HTML
               </Button>
               <Button
                 variant="outline"

@@ -9,10 +9,11 @@ from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Request
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Request, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import Response, FileResponse, HTMLResponse
+from sse_starlette.sse import EventSourceResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
@@ -32,6 +33,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 # Thread pool for blocking calls (Ollama, PDF, etc.)
 _executor = ThreadPoolExecutor(max_workers=4)
+_stream_executor = ThreadPoolExecutor(max_workers=4)
 
 # PDF generation
 from xhtml2pdf import pisa
@@ -263,6 +265,19 @@ def init_db():
     if "stripe_customer_id" not in columns:
         conn.execute("ALTER TABLE users ADD COLUMN stripe_customer_id TEXT")
         conn.commit()
+
+    # Add email verification and password reset columns
+    for col_sql in [
+        "ALTER TABLE users ADD COLUMN email_verified INTEGER DEFAULT 1",
+        "ALTER TABLE users ADD COLUMN verify_token TEXT",
+        "ALTER TABLE users ADD COLUMN reset_token TEXT",
+        "ALTER TABLE users ADD COLUMN reset_token_expires TEXT",
+    ]:
+        try:
+            conn.execute(col_sql)
+        except:
+            pass
+    conn.commit()
 
     conn.close()
 
@@ -1076,6 +1091,86 @@ async def login_user(req: LoginRequest):
 async def get_me(user=Depends(get_current_user)):
     return UserResponse(**user)
 
+# ==================== PASSWORD RESET ENDPOINTS ====================
+
+@app.post("/api/auth/forgot-password")
+async def forgot_password(request_data: dict = Body(...)):
+    """Generate a password reset token"""
+    email = request_data.get("email", "").strip()
+    if not email:
+        raise HTTPException(status_code=400, detail="Email is required")
+
+    conn = get_db()
+    user = conn.execute("SELECT id, email FROM users WHERE email = ?", (email.lower(),)).fetchone()
+
+    if not user:
+        conn.close()
+        # Don't reveal if email exists - always return success
+        return {"message": "If an account with that email exists, a reset link has been sent."}
+
+    # Generate reset token
+    import secrets as sec
+    reset_token = sec.token_urlsafe(32)
+    expires = (datetime.utcnow() + timedelta(hours=1)).isoformat()
+
+    conn.execute(
+        "UPDATE users SET reset_token = ?, reset_token_expires = ? WHERE id = ?",
+        (reset_token, expires, user["id"])
+    )
+    conn.commit()
+    conn.close()
+
+    # In production, send email with reset link containing the token
+    # For local/desktop app, we return the token directly (dev mode)
+    return {
+        "message": "If an account with that email exists, a reset link has been sent.",
+        "reset_token": reset_token  # Remove in production - only for local dev
+    }
+
+
+@app.post("/api/auth/reset-password")
+async def reset_password(request_data: dict = Body(...)):
+    """Reset password using a valid reset token"""
+    token = request_data.get("token", "").strip()
+    new_password = request_data.get("new_password", "").strip()
+
+    if not token or not new_password:
+        raise HTTPException(status_code=400, detail="Token and new password are required")
+
+    if len(new_password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+
+    conn = get_db()
+    user = conn.execute(
+        "SELECT id, reset_token_expires FROM users WHERE reset_token = ?",
+        (token,)
+    ).fetchone()
+
+    if not user:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+
+    # Check expiration
+    if user["reset_token_expires"]:
+        expires = datetime.fromisoformat(user["reset_token_expires"])
+        if datetime.utcnow() > expires:
+            conn.close()
+            raise HTTPException(status_code=400, detail="Reset token has expired")
+
+    # Update password and clear token
+    import secrets as sec
+    salt = sec.token_hex(16)
+    password_hash_val = hash_password(new_password, salt)
+
+    conn.execute(
+        "UPDATE users SET password_hash = ?, salt = ?, reset_token = NULL, reset_token_expires = NULL WHERE id = ?",
+        (password_hash_val, salt, user["id"])
+    )
+    conn.commit()
+    conn.close()
+
+    return {"message": "Password reset successfully. You can now sign in with your new password."}
+
 # ==================== SETTINGS ENDPOINTS ====================
 
 @app.post("/api/settings/api-keys")
@@ -1569,6 +1664,171 @@ def render_receipt_html(params: dict, items_text: str = "") -> str:
     return None  # Let LLM handle receipt content, we just fix the output format
 
 
+@app.post("/api/generate/stream")
+async def generate_document_stream(request: DocumentRequest, user=Depends(get_optional_user)):
+    """Stream document generation via SSE — real-time token-by-token output"""
+    import json as json_module
+
+    # Build the prompt (same logic as generate_document)
+    prompt = request.prompt
+    skill_used = None
+
+    # Apply skill template if selected
+    if request.skill_name:
+        skill = get_skill_by_name(request.skill_name)
+        if skill:
+            skill_prompt = apply_skill_template(skill, request.parameters)
+            prompt = f"{skill_prompt}\n\nAdditional context: {request.prompt}"
+            skill_used = skill.name
+
+    # Get brand style if specified
+    brand_style_instruction = ""
+    if request.brand_profile_id and user:
+        conn = get_db()
+        profile = conn.execute(
+            "SELECT * FROM brand_profiles WHERE id = ? AND user_id = ?",
+            (request.brand_profile_id, user["id"])
+        ).fetchone()
+        conn.close()
+        if profile and profile["style_json"]:
+            brand_style = json.loads(profile["style_json"])
+            brand_style_instruction = f"\n\nIMPORTANT - Style this document to match the following brand:\n- Primary color: {brand_style.get('primary_color')}\n- Secondary color: {brand_style.get('secondary_color')}\n- Style: {brand_style.get('style_description', 'professional')}\n- Use appropriate HTML formatting with inline styles matching these brand colors."
+
+    # Format instruction
+    format_instruction = ""
+    if request.output_format == "html":
+        format_instruction = "\n\nGenerate this as clean, well-structured HTML with appropriate tags (h1, h2, p, ul, table, etc.). Include inline CSS for styling."
+    elif request.output_format == "pdf":
+        format_instruction = "\n\nGenerate this as clean HTML suitable for PDF conversion. Use proper heading hierarchy, tables, lists, and structure. Include inline CSS for professional styling."
+    else:
+        format_instruction = "\n\nGenerate this as well-formatted Markdown with proper headings, lists, tables, and emphasis."
+
+    full_prompt = prompt + format_instruction + brand_style_instruction
+
+    # Determine provider
+    model_id = request.model
+    provider = None
+    for m in AVAILABLE_MODELS:
+        if m["id"] == model_id:
+            provider = m["provider"]
+            break
+    if not provider:
+        provider = "google"
+
+    async def event_generator():
+        try:
+            if provider == "google":
+                # Gemini streaming via thread + asyncio.Queue
+                api_key = GEMINI_API_KEY
+                if not api_key:
+                    conn = get_db()
+                    row = conn.execute("SELECT value FROM settings WHERE key = 'gemini_api_key'").fetchone()
+                    conn.close()
+                    if row:
+                        api_key = row["value"]
+                if not api_key:
+                    yield {"event": "error", "data": json_module.dumps({"error": "Gemini API key not configured. Go to Settings to add it."})}
+                    return
+
+                queue = asyncio.Queue()
+
+                def _stream_gemini():
+                    try:
+                        client = genai.Client(api_key=api_key)
+                        for chunk in client.models.generate_content_stream(
+                            model=model_id,
+                            contents=full_prompt,
+                            config=genai_types.GenerateContentConfig(
+                                temperature=request.temperature,
+                                max_output_tokens=request.max_tokens,
+                            ),
+                        ):
+                            if chunk.text:
+                                queue.put_nowait(chunk.text)
+                        queue.put_nowait(None)  # sentinel
+                    except Exception as e:
+                        queue.put_nowait(Exception(str(e)))
+
+                loop = asyncio.get_event_loop()
+                loop.run_in_executor(_stream_executor, _stream_gemini)
+
+                full_text = ""
+                while True:
+                    text = await queue.get()
+                    if text is None:
+                        break
+                    if isinstance(text, Exception):
+                        yield {"event": "error", "data": json_module.dumps({"error": str(text)})}
+                        return
+                    full_text += text
+                    yield {"event": "token", "data": json_module.dumps({"text": text})}
+
+                yield {"event": "done", "data": json_module.dumps({"full_text": full_text, "model_used": model_id, "skill_used": skill_used})}
+
+            elif provider == "anthropic":
+                # Anthropic native SSE streaming
+                api_key = ANTHROPIC_API_KEY
+                if not api_key:
+                    conn = get_db()
+                    row = conn.execute("SELECT value FROM settings WHERE key = 'anthropic_api_key'").fetchone()
+                    conn.close()
+                    if row:
+                        api_key = row["value"]
+                if not api_key:
+                    yield {"event": "error", "data": json_module.dumps({"error": "Anthropic API key not configured. Go to Settings to add it."})}
+                    return
+
+                import httpx
+                headers = {
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                }
+                payload = {
+                    "model": model_id,
+                    "max_tokens": request.max_tokens,
+                    "temperature": request.temperature,
+                    "stream": True,
+                    "messages": [{"role": "user", "content": full_prompt}],
+                }
+                full_text = ""
+                async with httpx.AsyncClient(timeout=120) as http_client:
+                    async with http_client.stream("POST", "https://api.anthropic.com/v1/messages", headers=headers, json=payload) as resp:
+                        async for line in resp.aiter_lines():
+                            if line.startswith("data: "):
+                                try:
+                                    data = json_module.loads(line[6:])
+                                except json_module.JSONDecodeError:
+                                    continue
+                                if data.get("type") == "content_block_delta":
+                                    text = data["delta"].get("text", "")
+                                    if text:
+                                        full_text += text
+                                        yield {"event": "token", "data": json_module.dumps({"text": text})}
+
+                yield {"event": "done", "data": json_module.dumps({"full_text": full_text, "model_used": model_id, "skill_used": skill_used})}
+
+            else:
+                # Ollama — generate full response then stream in word chunks
+                result = await generate_with_ollama(full_prompt, model_id, request.temperature)
+                words = result.split(" ")
+                full_text = ""
+                for i in range(0, len(words), 3):
+                    chunk = " ".join(words[i:i + 3])
+                    if i + 3 < len(words):
+                        chunk += " "
+                    full_text += chunk
+                    yield {"event": "token", "data": json_module.dumps({"text": chunk})}
+                    await asyncio.sleep(0.02)
+
+                yield {"event": "done", "data": json_module.dumps({"full_text": full_text, "model_used": model_id, "skill_used": skill_used})}
+
+        except Exception as e:
+            yield {"event": "error", "data": json_module.dumps({"error": str(e)})}
+
+    return EventSourceResponse(event_generator())
+
+
 @app.post("/api/generate", response_model=DocumentResponse)
 async def generate_document(request: DocumentRequest, user=Depends(get_optional_user)):
     """Generate a document with selected AI model"""
@@ -1851,6 +2111,41 @@ async def export_docx(
         content=buffer.read(),
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         headers={"Content-Disposition": f'attachment; filename="{base_filename}.docx"'}
+    )
+
+@app.post("/api/export/html")
+async def export_html(content: str = Form(...), filename: Optional[str] = Form(None)):
+    """Export document as styled HTML"""
+    html = markdown_to_html(content)
+    styled_html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{filename or 'Document'}</title>
+<style>
+body {{ font-family: 'Segoe UI', system-ui, sans-serif; max-width: 800px; margin: 40px auto; padding: 20px; line-height: 1.6; color: #1a1a2e; }}
+h1 {{ color: #0f172a; border-bottom: 2px solid #e2e8f0; padding-bottom: 8px; }}
+h2 {{ color: #1e293b; }}
+h3 {{ color: #334155; }}
+table {{ border-collapse: collapse; width: 100%; margin: 16px 0; }}
+th, td {{ border: 1px solid #e2e8f0; padding: 8px 12px; text-align: left; }}
+th {{ background: #f8fafc; font-weight: 600; }}
+code {{ background: #f1f5f9; padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }}
+pre {{ background: #f8fafc; padding: 16px; border-radius: 8px; overflow-x: auto; }}
+blockquote {{ border-left: 4px solid #e2e8f0; margin: 16px 0; padding: 8px 16px; color: #64748b; }}
+</style>
+</head>
+<body>
+{html}
+</body>
+</html>"""
+
+    base_filename = filename or f"document_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+    return Response(
+        content=styled_html,
+        media_type="text/html",
+        headers={"Content-Disposition": f'attachment; filename="{base_filename}.html"'}
     )
 
 @app.post("/api/export/{format}")

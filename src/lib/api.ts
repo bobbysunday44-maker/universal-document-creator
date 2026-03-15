@@ -78,9 +78,37 @@ export async function apiGetMe(): Promise<AuthUser> {
   return response.json();
 }
 
+// ==================== PASSWORD RESET API ====================
+
+export async function forgotPassword(email: string): Promise<{ message: string; reset_token?: string }> {
+  const response = await fetch(`${API_BASE_URL}/api/auth/forgot-password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email }),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ detail: 'Request failed' }));
+    throw new Error(err.detail || 'Request failed');
+  }
+  return response.json();
+}
+
+export async function resetPassword(token: string, newPassword: string): Promise<{ message: string }> {
+  const response = await fetch(`${API_BASE_URL}/api/auth/reset-password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token, new_password: newPassword }),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ detail: 'Reset failed' }));
+    throw new Error(err.detail || 'Reset failed');
+  }
+  return response.json();
+}
+
 // ==================== SETTINGS API ====================
 
-export async function saveApiKeys(keys: { gemini_api_key?: string }): Promise<void> {
+export async function saveApiKeys(keys: { gemini_api_key?: string; anthropic_api_key?: string }): Promise<void> {
   const response = await fetch(`${API_BASE_URL}/api/settings/api-keys`, {
     method: 'POST',
     headers: authHeaders(),
@@ -89,7 +117,7 @@ export async function saveApiKeys(keys: { gemini_api_key?: string }): Promise<vo
   if (!response.ok) throw new Error('Failed to save API keys');
 }
 
-export async function getApiKeyStatus(): Promise<{ gemini_configured: boolean }> {
+export async function getApiKeyStatus(): Promise<{ gemini_configured: boolean; anthropic_configured: boolean }> {
   const response = await fetch(`${API_BASE_URL}/api/settings/api-keys`, {
     headers: authHeaders(),
   });
@@ -422,6 +450,63 @@ export async function getHealthStatus(): Promise<any> {
   const response = await fetch(`${API_BASE_URL}/api/health`);
   if (!response.ok) throw new Error('Failed to get health status');
   return response.json();
+}
+
+// ==================== STREAMING GENERATION API ====================
+
+export async function generateDocumentStream(
+  request: DocumentRequest,
+  onToken: (text: string) => void,
+  onDone: (result: { full_text: string; model_used: string; skill_used: string | null }) => void,
+  onError: (error: string) => void
+): Promise<void> {
+  const token = getToken();
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+
+  const response = await fetch(`${API_BASE_URL}/api/generate/stream`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(request),
+  });
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ detail: 'Streaming failed' }));
+    throw new Error(err.detail || 'Streaming failed');
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error('No response body');
+
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+
+    for (const line of lines) {
+      if (line.startsWith('event: ')) {
+        // Store event type for next data line
+        (reader as any).__lastEvent = line.slice(7).trim();
+      } else if (line.startsWith('data: ')) {
+        const eventType = (reader as any).__lastEvent || 'token';
+        const data = JSON.parse(line.slice(6));
+
+        if (eventType === 'token') {
+          onToken(data.text);
+        } else if (eventType === 'done') {
+          onDone(data);
+        } else if (eventType === 'error') {
+          onError(data.error);
+        }
+      }
+    }
+  }
 }
 
 // Download helper
