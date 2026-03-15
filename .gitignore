@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Database (regenerated on first run)
+backend/udc.db
+
+# Uploads (user content)
+backend/uploads/
+
+# Build output (regenerate with npm run build)
+# dist/  — keeping dist/ for deployment
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Environment
+.env
