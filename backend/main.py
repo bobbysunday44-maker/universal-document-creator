@@ -263,7 +263,7 @@ def hash_password(password: str, salt: str) -> str:
 
 def create_token(user_id: int, email: str) -> str:
     payload = {
-        "sub": user_id,
+        "sub": str(user_id),
         "email": email,
         "exp": datetime.utcnow() + timedelta(hours=JWT_EXPIRY_HOURS),
         "iat": datetime.utcnow()
@@ -1079,7 +1079,6 @@ async def get_api_keys(user=Depends(get_current_user)):
     """Check which API keys are configured"""
     conn = get_db()
     gemini = conn.execute("SELECT value FROM settings WHERE key = 'gemini_api_key'").fetchone()
-    conn.close()
     anthropic = conn.execute("SELECT value FROM settings WHERE key = 'anthropic_api_key'").fetchone()
     conn.close()
     return {
