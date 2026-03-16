@@ -920,7 +920,7 @@ function AppContent() {
                         />
                       </div>
                       <Select value={adminPlanFilter || 'all'} onValueChange={(v) => { setAdminPlanFilter(v === 'all' ? '' : v); }}>
-                        <SelectTrigger className="w-[140px]">
+                        <SelectTrigger className="w-full sm:w-[140px]">
                           <SelectValue placeholder="All plans" />
                         </SelectTrigger>
                         <SelectContent>
@@ -1053,7 +1053,7 @@ function AppContent() {
                     {/* Action filter */}
                     <div className="flex gap-2">
                       <Select value={adminAuditAction || 'all'} onValueChange={(v) => { setAdminAuditAction(v === 'all' ? '' : v); }}>
-                        <SelectTrigger className="w-[200px]">
+                        <SelectTrigger className="w-full sm:w-[200px]">
                           <SelectValue placeholder="Filter by action" />
                         </SelectTrigger>
                         <SelectContent>
