@@ -53,7 +53,7 @@ Think of it as your own self-hosted alternative to PandaDoc, Jasper, or Gamma �
 +------------------------------------+-------------------------------+
                                      |
                                   REST API
-                                  (80 endpoints)
+                                  (90+ endpoints)
                                      |
 +------------------------------------+-------------------------------+
 |                        BACKEND (FastAPI + Python)                  |
@@ -144,11 +144,28 @@ Think of it as your own self-hosted alternative to PandaDoc, Jasper, or Gamma �
 - **Bulk batch generation** — Upload CSV, generate personalized documents at scale
 - **White label** — Customize app name, colors, logo for your brand
 
+### AI Charts & Diagrams
+- **Auto-generated charts** — AI includes bar, line, pie, and area charts in business documents
+- **Live interactive preview** — Charts render with Recharts in the document preview
+- **PDF/DOCX embedding** — Charts auto-convert to images via matplotlib for export
+- **Chart types** — Bar, Line, Area, Pie with branded color palette
+- **Server-side rendering** — `/api/render/chart` endpoint for standalone chart images
+
+### Admin Panel
+- **System dashboard** — Total users, documents, teams, signatures, daily charts
+- **User management** — Search, filter by plan, edit roles, toggle admin, delete users
+- **Registration approval** — New users require admin approval before they can log in
+- **Pending notifications** — Red badge on admin icon shows pending registration count
+- **Audit log viewer** — Filter by action type, paginated, shows user/IP/details
+- **Branding config** — Change app name, tagline, colors, support email
+- **Toggle approval** — Enable/disable registration approval requirement
+
 ### Security
 - **JWT authentication** with refresh tokens
 - **Password hashing** with PBKDF2-SHA256
 - **Forgot password** flow with time-limited reset tokens
-- **Audit logging** — All actions logged (login, generate, export, sign)
+- **Admin approval** — New registrations pending until admin approves
+- **Audit logging** — All actions logged (login, generate, export, sign, approve, reject)
 - **API 404 protection** — Unknown /api/ routes return JSON errors
 - **Rate limiting** per user with monthly reset
 
@@ -324,10 +341,23 @@ The backend auto-generates OpenAPI docs. After starting the server:
 | GET | `/api/workflows/templates` | Pre-built workflows |
 | POST | `/api/workflows/execute` | Execute workflow |
 
+#### Charts
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/render/chart` | Render chart as PNG image |
+
 #### Admin
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | POST | `/api/admin/promote` | Promote to admin |
+| GET | `/api/admin/stats` | System-wide statistics |
+| GET | `/api/admin/users` | List all users (search/filter) |
+| PUT | `/api/admin/users/{id}` | Edit user plan/role |
+| DELETE | `/api/admin/users/{id}` | Delete user |
+| GET | `/api/admin/pending-users` | List pending registrations |
+| POST | `/api/admin/approve-user/{id}` | Approve registration |
+| POST | `/api/admin/reject-user/{id}` | Reject and delete |
+| POST | `/api/admin/toggle-approval` | Toggle approval requirement |
 | GET | `/api/admin/audit-logs` | View audit logs |
 | POST | `/api/admin/branding` | Set white-label config |
 | GET | `/api/user/dashboard` | Usage dashboard |
@@ -524,7 +554,7 @@ audit_logs               | user_id (FK)     |    | signature_data   |
 ```
 universal-document-creator/
 +-- backend/
-|   +-- main.py                 # FastAPI server (3,878 lines, 80 endpoints)
+|   +-- main.py                 # FastAPI server (4,500+ lines, 90+ endpoints)
 |   +-- skills.md               # Built-in document templates
 |   +-- migrate_to_postgres.py  # PostgreSQL migration script
 |   +-- udc.db                  # SQLite database (auto-created)
@@ -532,6 +562,7 @@ universal-document-creator/
 |   +-- App.tsx                 # Main app component (1,514 lines)
 |   +-- components/
 |   |   +-- AuthModal.tsx       # Login/Register/Forgot password
+|   |   +-- ChartRenderer.tsx   # Recharts bar/line/pie/area renderer
 |   |   +-- DocumentEditor.tsx  # Editor with Edit/Preview tabs
 |   |   +-- PremiumHeader.tsx   # Navigation header
 |   |   +-- Footer.tsx          # Footer with legal modals

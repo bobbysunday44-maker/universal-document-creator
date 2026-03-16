@@ -2879,7 +2879,7 @@ async def promote_to_admin(request_data: dict = Body(...)):
         conn.close()
         raise HTTPException(status_code=404, detail="User not found")
 
-    conn.execute("UPDATE users SET is_admin = 1, plan = 'enterprise' WHERE id = ?", (user["id"],))
+    conn.execute("UPDATE users SET is_admin = 1, plan = 'enterprise', is_approved = 1 WHERE id = ?", (user["id"],))
     conn.commit()
     conn.close()
 
