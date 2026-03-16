@@ -410,7 +410,7 @@ Returns a downloadable .pptx file.
 ```bash
 curl -X POST http://localhost:8001/api/admin/promote \
   -H "Content-Type: application/json" \
-  -d '{"email": "your@email.com", "secret": "universaldoc-admin-2026"}'
+  -d '{"email": "your@email.com", "secret": "YOUR_ADMIN_SECRET_FROM_ENV"}'
 ```
 
 Admin users get:

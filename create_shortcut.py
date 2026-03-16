@@ -2,6 +2,7 @@
 import os
 import subprocess
 import sys
+import shutil
 
 # Use the REAL desktop path (handles OneDrive redirection)
 result = subprocess.run(
@@ -9,11 +10,16 @@ result = subprocess.run(
     capture_output=True, text=True, timeout=10,
 )
 DESKTOP = result.stdout.strip() or os.path.join(os.environ["USERPROFILE"], "Desktop")
+HOME = os.environ["USERPROFILE"]
 
-PYTHON310W = r"C:\Users\bombo\AppData\Local\Programs\Python\Python310\pythonw.exe"
-LAUNCHER = r"C:\Users\bombo\.universaldoc\launcher.pyw"
-ICON = r"C:\Users\bombo\.universaldoc\universaldoc.ico"
-WORK_DIR = r"C:\Users\bombo\.universaldoc"
+# Auto-detect Python — prefer 3.10 (for pywebview/torch compat), fallback to any
+PYTHON310W = os.path.join(HOME, r"AppData\Local\Programs\Python\Python310\pythonw.exe")
+if not os.path.exists(PYTHON310W):
+    PYTHON310W = shutil.which("pythonw") or shutil.which("python") or "pythonw.exe"
+
+UDC_DIR = os.path.join(HOME, ".universaldoc")
+LAUNCHER = os.path.join(UDC_DIR, "launcher.pyw")
+ICON = os.path.join(UDC_DIR, "universaldoc.ico")
 SHORTCUT = os.path.join(DESKTOP, "UniversalDoc.lnk")
 
 # Create via PowerShell
@@ -22,7 +28,7 @@ $ws = New-Object -ComObject WScript.Shell
 $s = $ws.CreateShortcut("{SHORTCUT}")
 $s.TargetPath = "{PYTHON310W}"
 $s.Arguments = '"{LAUNCHER}"'
-$s.WorkingDirectory = "{WORK_DIR}"
+$s.WorkingDirectory = "{UDC_DIR}"
 $s.Description = "UniversalDoc - AI Document Creator"
 $s.IconLocation = "{ICON}, 0"
 $s.Save()

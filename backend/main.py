@@ -2605,7 +2605,9 @@ async def generate_image_endpoint(
 @app.post("/api/admin/promote")
 async def promote_to_admin(request_data: dict = Body(...)):
     """Promote a user to admin. Requires admin secret."""
-    admin_secret = os.getenv("ADMIN_SECRET", "universaldoc-admin-2026")
+    admin_secret = os.getenv("ADMIN_SECRET", "")
+    if not admin_secret:
+        raise HTTPException(status_code=500, detail="ADMIN_SECRET not configured in environment")
 
     if request_data.get("secret") != admin_secret:
         raise HTTPException(status_code=403, detail="Invalid admin secret")
