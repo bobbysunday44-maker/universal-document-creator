@@ -25,6 +25,7 @@ import {
   DialogTrigger,
 } from '@/components/ui/dialog';
 import { Label } from '@/components/ui/label';
+import { ChartRenderer } from '@/components/ChartRenderer';
 
 interface DocumentEditorProps {
   content: string;
@@ -162,27 +163,6 @@ export function DocumentEditor({
     }
   };
 
-  const renderPreview = () => {
-    const lines = content.split('\n');
-    return lines.map((line, index) => {
-      if (line.startsWith('# ')) {
-        return <h1 key={index} className="text-2xl font-bold mt-4 mb-2">{line.slice(2)}</h1>;
-      } else if (line.startsWith('## ')) {
-        return <h2 key={index} className="text-xl font-semibold mt-4 mb-2">{line.slice(3)}</h2>;
-      } else if (line.startsWith('### ')) {
-        return <h3 key={index} className="text-lg font-medium mt-3 mb-1">{line.slice(4)}</h3>;
-      } else if (line.startsWith('- ') || line.startsWith('* ')) {
-        return <li key={index} className="ml-4">{line.slice(2)}</li>;
-      } else if (line.startsWith('**') && line.endsWith('**')) {
-        return <p key={index} className="font-semibold my-1">{line.slice(2, -2)}</p>;
-      } else if (line.trim() === '') {
-        return <br key={index} />;
-      } else {
-        return <p key={index} className="my-1">{line}</p>;
-      }
-    });
-  };
-
   return (
     <Card className="flex flex-col h-full">
       <CardHeader className="pb-3 border-b">
@@ -318,7 +298,23 @@ export function DocumentEditor({
 
           <TabsContent value="preview" className="flex-1 m-0 p-4 overflow-auto">
             <div className="prose prose-sm max-w-none">
-              {content ? renderPreview() : (
+              {content ? (
+                <ChartRenderer
+                  content={content}
+                  renderText={(text) => {
+                    const lines = text.split('\n');
+                    return lines.map((line, index) => {
+                      if (line.startsWith('# ')) return <h1 key={index} className="text-2xl font-bold mt-4 mb-2">{line.slice(2)}</h1>;
+                      if (line.startsWith('## ')) return <h2 key={index} className="text-xl font-semibold mt-4 mb-2">{line.slice(3)}</h2>;
+                      if (line.startsWith('### ')) return <h3 key={index} className="text-lg font-medium mt-3 mb-1">{line.slice(4)}</h3>;
+                      if (line.startsWith('- ') || line.startsWith('* ')) return <li key={index} className="ml-4">{line.slice(2)}</li>;
+                      if (line.startsWith('**') && line.endsWith('**')) return <p key={index} className="font-semibold my-1">{line.slice(2, -2)}</p>;
+                      if (line.trim() === '') return <br key={index} />;
+                      return <p key={index} className="my-1">{line}</p>;
+                    });
+                  }}
+                />
+              ) : (
                 <p className="text-muted-foreground italic">
                   Generate a document to see the preview
                 </p>

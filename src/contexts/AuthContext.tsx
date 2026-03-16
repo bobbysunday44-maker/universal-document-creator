@@ -7,6 +7,7 @@ interface User {
   name: string;
   avatar?: string;
   plan: 'free' | 'pro' | 'enterprise';
+  is_admin?: boolean;
 }
 
 interface AuthContextType {
@@ -26,6 +27,7 @@ function toUser(apiUser: AuthUser): User {
     email: apiUser.email,
     name: apiUser.name,
     plan: apiUser.plan,
+    is_admin: apiUser.is_admin || false,
   };
 }
 

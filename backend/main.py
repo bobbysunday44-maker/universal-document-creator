@@ -592,6 +592,7 @@ class UserResponse(BaseModel):
     name: str
     plan: str
     created_at: str
+    is_admin: bool = False
 
 class AuthResponse(BaseModel):
     user: UserResponse
@@ -1302,7 +1303,7 @@ async def register_user(req: RegisterRequest):
     )
     conn.commit()
     user_id = cursor.lastrowid
-    user = conn.execute("SELECT id, email, name, plan, created_at FROM users WHERE id = ?", (user_id,)).fetchone()
+    user = conn.execute("SELECT id, email, name, plan, created_at, is_admin FROM users WHERE id = ?", (user_id,)).fetchone()
     conn.close()
 
     log_audit(user_id, "register", f"New account: {req.email}")
@@ -1322,7 +1323,8 @@ async def login_user(req: LoginRequest, request: Request):
     log_audit(user["id"], "login", f"Login from {request.client.host if hasattr(request, 'client') else 'unknown'}")
     return AuthResponse(
         user=UserResponse(id=user["id"], email=user["email"], name=user["name"],
-                          plan=user["plan"], created_at=user["created_at"]),
+                          plan=user["plan"], created_at=user["created_at"],
+                          is_admin=bool(user["is_admin"])),
         token=create_token(user["id"], user["email"])
     )
 
@@ -2038,6 +2040,24 @@ async def generate_document_stream(request: DocumentRequest, user=Depends(get_op
 
     full_prompt = prompt + format_instruction + brand_style_instruction
 
+    # Add chart generation instructions for applicable document types
+    chart_skills = {"Business Proposal", "Executive Summary", "Financial Report", "Marketing Copy", "Technical Documentation", "Project Proposal", "Market Analysis"}
+    if not skill_used or skill_used in chart_skills:
+        chart_instructions = """
+
+When the content would benefit from visual data representation, include charts using this exact format:
+
+```chart
+{"type": "bar", "title": "Chart Title", "data": [{"label": "Item 1", "value": 100}, {"label": "Item 2", "value": 200}]}
+```
+
+Supported chart types: "bar", "line", "pie", "area"
+For pie charts use: {"type": "pie", "title": "Title", "data": [{"name": "Segment", "value": 30}]}
+For line/area charts use: {"type": "line", "title": "Title", "data": [{"label": "Jan", "value": 100}, {"label": "Feb", "value": 150}]}
+
+Include charts when showing: revenue projections, market data, comparisons, growth trends, budget breakdowns, survey results, statistics, or any numerical data that benefits from visualization. Do NOT include charts for simple text documents like letters or creative writing."""
+        full_prompt = full_prompt + chart_instructions
+
     if request.language:
         full_prompt = f"{full_prompt}\n\nIMPORTANT: Write the entire document in {request.language}."
 
@@ -2261,6 +2281,24 @@ async def generate_document(request: DocumentRequest, user=Depends(get_optional_
 
     full_prompt = prompt + format_instruction + brand_style_instruction
 
+    # Add chart generation instructions for applicable document types
+    chart_skills = {"Business Proposal", "Executive Summary", "Financial Report", "Marketing Copy", "Technical Documentation", "Project Proposal", "Market Analysis"}
+    if not skill_used or skill_used in chart_skills:
+        chart_instructions = """
+
+When the content would benefit from visual data representation, include charts using this exact format:
+
+```chart
+{"type": "bar", "title": "Chart Title", "data": [{"label": "Item 1", "value": 100}, {"label": "Item 2", "value": 200}]}
+```
+
+Supported chart types: "bar", "line", "pie", "area"
+For pie charts use: {"type": "pie", "title": "Title", "data": [{"name": "Segment", "value": 30}]}
+For line/area charts use: {"type": "line", "title": "Title", "data": [{"label": "Jan", "value": 100}, {"label": "Feb", "value": 150}]}
+
+Include charts when showing: revenue projections, market data, comparisons, growth trends, budget breakdowns, survey results, statistics, or any numerical data that benefits from visualization. Do NOT include charts for simple text documents like letters or creative writing."""
+        full_prompt = full_prompt + chart_instructions
+
     if request.language:
         full_prompt = f"{full_prompt}\n\nIMPORTANT: Write the entire document in {request.language}."
 
@@ -2424,9 +2462,61 @@ async def export_as_pdf(
         if profile and profile["style_json"]:
             brand_style = json.loads(profile["style_json"])
 
+    # Convert chart blocks to images for PDF
+    import re as re_mod
+
+    chart_pattern = re_mod.compile(r'```chart\s*\n?(.*?)```', re_mod.DOTALL)
+
+    def replace_chart_with_image(match):
+        try:
+            chart_json = json.loads(match.group(1).strip())
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+
+            chart_type = chart_json.get("type", "bar")
+            title = chart_json.get("title", "")
+            data = chart_json.get("data", [])
+            pdf_colors = ['#ea580c', '#f97316', '#0891b2', '#8b5cf6', '#10b981', '#f43f5e']
+
+            fig, ax = plt.subplots(figsize=(6, 3.5), dpi=100)
+            plt.style.use('seaborn-v0_8-whitegrid')
+
+            if chart_type == "bar":
+                labels = [d.get("label", d.get("name", "")) for d in data]
+                values = [d.get("value", 0) for d in data]
+                ax.bar(labels, values, color=pdf_colors[:len(data)])
+            elif chart_type in ("line", "area"):
+                labels = [d.get("label", d.get("name", "")) for d in data]
+                values = [d.get("value", 0) for d in data]
+                ax.plot(labels, values, color='#ea580c', linewidth=2, marker='o')
+                if chart_type == "area":
+                    ax.fill_between(range(len(values)), values, alpha=0.15, color='#ea580c')
+                    ax.set_xticks(range(len(labels)))
+                    ax.set_xticklabels(labels)
+            elif chart_type == "pie":
+                names = [d.get("name", d.get("label", "")) for d in data]
+                values = [d.get("value", 0) for d in data]
+                ax.pie(values, labels=names, colors=pdf_colors[:len(data)], autopct='%1.1f%%')
+
+            if title:
+                ax.set_title(title, fontsize=11, fontweight='bold')
+            plt.tight_layout()
+
+            buf = io.BytesIO()
+            fig.savefig(buf, format='png', bbox_inches='tight', facecolor='white')
+            plt.close(fig)
+            buf.seek(0)
+            img_b64 = base64.b64encode(buf.read()).decode('utf-8')
+            return f'<img src="data:image/png;base64,{img_b64}" style="width:100%;max-width:550px;margin:16px auto;display:block;" />'
+        except Exception:
+            return ""  # Silently skip broken charts
+
+    content_with_charts = chart_pattern.sub(replace_chart_with_image, content)
+
     # If content is already HTML (from a template), use directly; skip extra footer if it has one
-    is_raw_html = content.strip().startswith("<")
-    html = content if is_raw_html else markdown_to_html(content)
+    is_raw_html = content_with_charts.strip().startswith("<")
+    html = content_with_charts if is_raw_html else markdown_to_html(content_with_charts)
     has_own_footer = "Generated by Universal Document Creator" in content
     loop = asyncio.get_event_loop()
     pdf_bytes = await loop.run_in_executor(_executor, generate_pdf_bytes, html, brand_style, not has_own_footer)
@@ -2454,24 +2544,84 @@ async def export_docx(
     """Export document as DOCX"""
     from docx import Document as DocxDocument
     from docx.shared import Pt, Inches
-    import io
+    import io as io_mod
 
     doc = DocxDocument()
-    # Parse markdown-like content
-    for line in content.split('\n'):
-        line = line.strip()
-        if line.startswith('# '):
-            doc.add_heading(line[2:], level=1)
-        elif line.startswith('## '):
-            doc.add_heading(line[3:], level=2)
-        elif line.startswith('### '):
-            doc.add_heading(line[4:], level=3)
-        elif line.startswith('- ') or line.startswith('* '):
-            doc.add_paragraph(line[2:], style='List Bullet')
-        elif line:
-            # Handle bold text **text**
-            clean = re.sub(r'\*\*(.*?)\*\*', r'\1', line)
-            doc.add_paragraph(clean)
+
+    # Extract chart blocks and split content into parts
+    import re as re_docx
+    chart_block_pattern = re_docx.compile(r'```chart\s*\n?(.*?)```', re_docx.DOTALL)
+
+    def render_chart_to_docx_image(chart_json_str):
+        """Render a chart JSON string to a BytesIO PNG image for DOCX embedding"""
+        try:
+            chart_json = json.loads(chart_json_str.strip())
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+
+            chart_type = chart_json.get("type", "bar")
+            title = chart_json.get("title", "")
+            data = chart_json.get("data", [])
+            docx_colors = ['#ea580c', '#f97316', '#0891b2', '#8b5cf6', '#10b981', '#f43f5e']
+
+            fig, ax = plt.subplots(figsize=(6, 3.5), dpi=150)
+            plt.style.use('seaborn-v0_8-whitegrid')
+
+            if chart_type == "bar":
+                labels = [d.get("label", d.get("name", "")) for d in data]
+                values = [d.get("value", 0) for d in data]
+                ax.bar(labels, values, color=docx_colors[:len(data)])
+            elif chart_type in ("line", "area"):
+                labels = [d.get("label", d.get("name", "")) for d in data]
+                values = [d.get("value", 0) for d in data]
+                ax.plot(labels, values, color='#ea580c', linewidth=2, marker='o')
+                if chart_type == "area":
+                    ax.fill_between(range(len(values)), values, alpha=0.15, color='#ea580c')
+                    ax.set_xticks(range(len(labels)))
+                    ax.set_xticklabels(labels)
+            elif chart_type == "pie":
+                names = [d.get("name", d.get("label", "")) for d in data]
+                values = [d.get("value", 0) for d in data]
+                ax.pie(values, labels=names, colors=docx_colors[:len(data)], autopct='%1.1f%%')
+
+            if title:
+                ax.set_title(title, fontsize=11, fontweight='bold')
+            plt.tight_layout()
+
+            img_buf = io_mod.BytesIO()
+            fig.savefig(img_buf, format='png', bbox_inches='tight', facecolor='white')
+            plt.close(fig)
+            img_buf.seek(0)
+            return img_buf
+        except Exception:
+            return None
+
+    # Split content by chart blocks
+    parts = chart_block_pattern.split(content)
+    # parts alternates: text, chart_json, text, chart_json, ...
+    for i, part in enumerate(parts):
+        if i % 2 == 1:
+            # This is a chart JSON block
+            img_buf = render_chart_to_docx_image(part)
+            if img_buf:
+                doc.add_picture(img_buf, width=Inches(5.5))
+        else:
+            # This is regular text content - parse markdown-like content
+            for line in part.split('\n'):
+                line = line.strip()
+                if line.startswith('# '):
+                    doc.add_heading(line[2:], level=1)
+                elif line.startswith('## '):
+                    doc.add_heading(line[3:], level=2)
+                elif line.startswith('### '):
+                    doc.add_heading(line[4:], level=3)
+                elif line.startswith('- ') or line.startswith('* '):
+                    doc.add_paragraph(line[2:], style='List Bullet')
+                elif line:
+                    # Handle bold text **text**
+                    clean = re.sub(r'\*\*(.*?)\*\*', r'\1', line)
+                    doc.add_paragraph(clean)
 
     buffer = io.BytesIO()
     doc.save(buffer)
@@ -2547,6 +2697,76 @@ async def export_document(format: str, content: str = Form(...), filename: Optio
         f.write(content)
 
     return {"content": content, "filename": f"{base_filename}.{ext}", "mime_type": f"text/{'plain' if format == 'text' else 'markdown'}", "format": format}
+
+@app.post("/api/render/chart")
+async def render_chart_image(request_data: dict = Body(...)):
+    """Render a chart as PNG image using matplotlib"""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    chart_type = request_data.get("type", "bar")
+    title = request_data.get("title", "")
+    data = request_data.get("data", [])
+    width = request_data.get("width", 600)
+    height = request_data.get("height", 400)
+
+    if not data:
+        raise HTTPException(status_code=400, detail="No chart data")
+
+    # Set style
+    plt.style.use('seaborn-v0_8-whitegrid')
+    fig, ax = plt.subplots(figsize=(width/100, height/100), dpi=100)
+
+    colors_list = ['#ea580c', '#f97316', '#fb923c', '#fdba74', '#fed7aa', '#0891b2', '#06b6d4', '#22d3ee', '#67e8f9', '#a5f3fc']
+
+    if chart_type == "bar":
+        labels = [d.get("label", d.get("name", "")) for d in data]
+        values = [d.get("value", 0) for d in data]
+        bars = ax.bar(labels, values, color=colors_list[:len(data)], edgecolor='white', linewidth=0.5)
+        ax.set_ylabel('')
+        # Add value labels on bars
+        for bar, val in zip(bars, values):
+            ax.text(bar.get_x() + bar.get_width()/2., bar.get_height() + max(values)*0.02,
+                    f'{val:,.0f}' if isinstance(val, (int, float)) else str(val),
+                    ha='center', va='bottom', fontsize=9, fontweight='bold')
+
+    elif chart_type == "line" or chart_type == "area":
+        labels = [d.get("label", d.get("name", "")) for d in data]
+        values = [d.get("value", 0) for d in data]
+        ax.plot(labels, values, color='#ea580c', linewidth=2.5, marker='o', markersize=6)
+        if chart_type == "area":
+            ax.fill_between(range(len(labels)), values, alpha=0.15, color='#ea580c')
+            ax.set_xticks(range(len(labels)))
+            ax.set_xticklabels(labels)
+        # Add value labels
+        for i, (x, y) in enumerate(zip(labels, values)):
+            ax.annotate(f'{y:,.0f}' if isinstance(y, (int, float)) else str(y),
+                       (x if chart_type != "area" else i, y),
+                       textcoords="offset points", xytext=(0, 10), ha='center', fontsize=8)
+
+    elif chart_type == "pie":
+        names = [d.get("name", d.get("label", "")) for d in data]
+        values = [d.get("value", 0) for d in data]
+        wedges, texts, autotexts = ax.pie(values, labels=names, colors=colors_list[:len(data)],
+                                           autopct='%1.1f%%', startangle=90,
+                                           textprops={'fontsize': 9})
+        for autotext in autotexts:
+            autotext.set_fontweight('bold')
+
+    if title:
+        ax.set_title(title, fontsize=13, fontweight='bold', pad=15)
+
+    plt.tight_layout()
+
+    # Save to bytes
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', bbox_inches='tight', facecolor='white', edgecolor='none')
+    plt.close(fig)
+    buf.seek(0)
+
+    img_base64 = base64.b64encode(buf.read()).decode('utf-8')
+    return {"image_base64": img_base64, "mime_type": "image/png"}
 
 @app.get("/api/models")
 async def get_available_models():
@@ -2627,6 +2847,186 @@ async def promote_to_admin(request_data: dict = Body(...)):
     conn.close()
 
     return {"message": f"User {email} promoted to admin with enterprise plan"}
+
+
+@app.get("/api/admin/stats")
+async def get_admin_stats(user=Depends(get_current_user)):
+    """Get system-wide statistics (admin only)"""
+    if not user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    conn = get_db()
+    stats = {}
+
+    # User stats
+    stats["total_users"] = conn.execute("SELECT COUNT(*) as c FROM users").fetchone()["c"]
+    stats["users_today"] = conn.execute("SELECT COUNT(*) as c FROM users WHERE created_at > datetime('now', '-1 day')").fetchone()["c"]
+    stats["users_this_week"] = conn.execute("SELECT COUNT(*) as c FROM users WHERE created_at > datetime('now', '-7 days')").fetchone()["c"]
+    stats["users_this_month"] = conn.execute("SELECT COUNT(*) as c FROM users WHERE created_at > datetime('now', '-30 days')").fetchone()["c"]
+
+    # Plan breakdown
+    plans = conn.execute("SELECT plan, COUNT(*) as count FROM users GROUP BY plan").fetchall()
+    stats["plan_breakdown"] = {r["plan"]: r["count"] for r in plans}
+
+    # Admin count
+    stats["admin_count"] = conn.execute("SELECT COUNT(*) as c FROM users WHERE is_admin = 1").fetchone()["c"]
+
+    # Document stats
+    stats["total_documents"] = conn.execute("SELECT COUNT(*) as c FROM documents").fetchone()["c"]
+    stats["documents_today"] = conn.execute("SELECT COUNT(*) as c FROM documents WHERE created_at > datetime('now', '-1 day')").fetchone()["c"]
+    stats["documents_this_week"] = conn.execute("SELECT COUNT(*) as c FROM documents WHERE created_at > datetime('now', '-7 days')").fetchone()["c"]
+
+    # Published docs
+    try:
+        stats["published_documents"] = conn.execute("SELECT COUNT(*) as c FROM documents WHERE is_published = 1").fetchone()["c"]
+    except Exception:
+        stats["published_documents"] = 0
+
+    # Team stats
+    stats["total_teams"] = conn.execute("SELECT COUNT(*) as c FROM teams").fetchone()["c"]
+
+    # Signature stats
+    try:
+        stats["total_signatures"] = conn.execute("SELECT COUNT(*) as c FROM signature_requests").fetchone()["c"]
+        stats["signed_count"] = conn.execute("SELECT COUNT(*) as c FROM signature_requests WHERE status = 'signed'").fetchone()["c"]
+        stats["pending_signatures"] = conn.execute("SELECT COUNT(*) as c FROM signature_requests WHERE status = 'pending'").fetchone()["c"]
+    except Exception:
+        stats["total_signatures"] = 0
+        stats["signed_count"] = 0
+        stats["pending_signatures"] = 0
+
+    # Marketplace stats
+    try:
+        stats["marketplace_templates"] = conn.execute("SELECT COUNT(*) as c FROM marketplace_templates").fetchone()["c"]
+        stats["marketplace_downloads"] = conn.execute("SELECT COALESCE(SUM(downloads), 0) as c FROM marketplace_templates").fetchone()["c"]
+    except Exception:
+        stats["marketplace_templates"] = 0
+        stats["marketplace_downloads"] = 0
+
+    # Top models used
+    top_models = conn.execute("SELECT model_used, COUNT(*) as count FROM documents WHERE model_used IS NOT NULL GROUP BY model_used ORDER BY count DESC LIMIT 5").fetchall()
+    stats["top_models"] = [{"name": r["model_used"], "count": r["count"]} for r in top_models]
+
+    # Top skills used
+    top_skills = conn.execute("SELECT skill_used, COUNT(*) as count FROM documents WHERE skill_used IS NOT NULL GROUP BY skill_used ORDER BY count DESC LIMIT 5").fetchall()
+    stats["top_skills"] = [{"name": r["skill_used"], "count": r["count"]} for r in top_skills]
+
+    # Recent signups (last 10)
+    recent = conn.execute("SELECT id, name, email, plan, is_admin, created_at FROM users ORDER BY created_at DESC LIMIT 10").fetchall()
+    stats["recent_signups"] = [dict(r) for r in recent]
+
+    # Daily document count (last 7 days)
+    daily = conn.execute("""
+        SELECT DATE(created_at) as date, COUNT(*) as count
+        FROM documents
+        WHERE created_at > datetime('now', '-7 days')
+        GROUP BY DATE(created_at)
+        ORDER BY date
+    """).fetchall()
+    stats["daily_documents"] = [{"date": r["date"], "count": r["count"]} for r in daily]
+
+    # Daily signups (last 7 days)
+    daily_users = conn.execute("""
+        SELECT DATE(created_at) as date, COUNT(*) as count
+        FROM users
+        WHERE created_at > datetime('now', '-7 days')
+        GROUP BY DATE(created_at)
+        ORDER BY date
+    """).fetchall()
+    stats["daily_signups"] = [{"date": r["date"], "count": r["count"]} for r in daily_users]
+
+    conn.close()
+    return stats
+
+
+@app.get("/api/admin/users")
+async def get_all_users(user=Depends(get_current_user), search: Optional[str] = None, plan: Optional[str] = None, limit: int = 50, offset: int = 0):
+    """List all users with search/filter (admin only)"""
+    if not user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    conn = get_db()
+    query = "SELECT id, email, name, plan, is_admin, generation_count, stripe_customer_id, created_at FROM users WHERE 1=1"
+    params = []
+
+    if search:
+        query += " AND (name LIKE ? OR email LIKE ?)"
+        params.extend([f"%{search}%", f"%{search}%"])
+    if plan:
+        query += " AND plan = ?"
+        params.append(plan)
+
+    total = conn.execute(query.replace("SELECT id, email, name, plan, is_admin, generation_count, stripe_customer_id, created_at", "SELECT COUNT(*) as c"), params).fetchone()["c"]
+
+    query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+    params.extend([limit, offset])
+
+    users_list = conn.execute(query, params).fetchall()
+    conn.close()
+
+    return {"users": [dict(u) for u in users_list], "total": total, "limit": limit, "offset": offset}
+
+
+@app.put("/api/admin/users/{user_id}")
+async def update_user_admin(user_id: int, request_data: dict = Body(...), user=Depends(get_current_user)):
+    """Update a user's plan or admin status (admin only)"""
+    if not user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    conn = get_db()
+    target = conn.execute("SELECT id, email FROM users WHERE id = ?", (user_id,)).fetchone()
+    if not target:
+        conn.close()
+        raise HTTPException(status_code=404, detail="User not found")
+
+    updates = []
+    params = []
+    if "plan" in request_data:
+        if request_data["plan"] in ("free", "pro", "enterprise"):
+            updates.append("plan = ?")
+            params.append(request_data["plan"])
+    if "is_admin" in request_data:
+        updates.append("is_admin = ?")
+        params.append(1 if request_data["is_admin"] else 0)
+    if "generation_count" in request_data:
+        updates.append("generation_count = ?")
+        params.append(int(request_data["generation_count"]))
+
+    if updates:
+        params.append(user_id)
+        conn.execute(f"UPDATE users SET {', '.join(updates)} WHERE id = ?", params)
+        conn.commit()
+        try:
+            log_audit(user["id"], "admin_edit_user", f"Edited user {target['email']}: {list(request_data.keys())}")
+        except:
+            pass
+
+    conn.close()
+    return {"message": f"User {target['email']} updated"}
+
+
+@app.delete("/api/admin/users/{user_id}")
+async def delete_user_admin(user_id: int, user=Depends(get_current_user)):
+    """Delete a user (admin only, cannot delete yourself)"""
+    if not user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    if user_id == user["id"]:
+        raise HTTPException(status_code=400, detail="Cannot delete yourself")
+
+    conn = get_db()
+    target = conn.execute("SELECT email FROM users WHERE id = ?", (user_id,)).fetchone()
+    if not target:
+        conn.close()
+        raise HTTPException(status_code=404, detail="User not found")
+
+    conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+    try:
+        log_audit(user["id"], "admin_delete_user", f"Deleted user {target['email']}")
+    except:
+        pass
+    return {"message": f"User {target['email']} deleted"}
 
 
 @app.get("/api/user/dashboard")

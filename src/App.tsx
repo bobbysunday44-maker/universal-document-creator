@@ -20,6 +20,7 @@ import {
   getDocuments, getDocument, deleteDocument, downloadDocumentPdf,
   getImageModels, generateImage,
   getDashboard,
+  getAdminStats, getAdminUsers, updateUserAdmin, deleteUserAdmin, getAuditLogs, updateBranding, getBranding,
   type BrandProfile, type SavedDocument
 } from '@/lib/api';
 import { Button } from '@/components/ui/button';
@@ -71,12 +72,20 @@ import {
   Search,
   FileDown,
   BarChart3,
+  Shield,
+  Users,
+  Activity,
+  TrendingUp,
+  FileBarChart,
+  ChevronLeft,
+  ChevronRight,
+  RefreshCw,
 } from 'lucide-react';
 
 // Main App Component
 function AppContent() {
   const { isAuthenticated, user } = useAuth();
-  const [currentView, setCurrentView] = useState<'landing' | 'app' | 'dashboard'>('landing');
+  const [currentView, setCurrentView] = useState<'landing' | 'app' | 'dashboard' | 'admin'>('landing');
   const [currentSection, setCurrentSection] = useState('home');
 
   // App State
@@ -130,6 +139,21 @@ function AppContent() {
   // Dashboard state
   const [dashboardData, setDashboardData] = useState<any>(null);
   const [dashboardLoading, setDashboardLoading] = useState(false);
+
+  // Admin panel state
+  const [adminStats, setAdminStats] = useState<any>(null);
+  const [adminUsers, setAdminUsers] = useState<any[]>([]);
+  const [adminUsersTotal, setAdminUsersTotal] = useState(0);
+  const [adminUsersPage, setAdminUsersPage] = useState(0);
+  const [adminUserSearch, setAdminUserSearch] = useState('');
+  const [adminPlanFilter, setAdminPlanFilter] = useState('');
+  const [adminAuditLogs, setAdminAuditLogs] = useState<any[]>([]);
+  const [adminAuditTotal, setAdminAuditTotal] = useState(0);
+  const [adminAuditPage, setAdminAuditPage] = useState(0);
+  const [adminAuditAction, setAdminAuditAction] = useState('');
+  const [adminTab, setAdminTab] = useState<'overview' | 'users' | 'audit' | 'branding'>('overview');
+  const [adminLoading, setAdminLoading] = useState(false);
+  const [brandingForm, setBrandingForm] = useState<Record<string, string>>({});
 
   // Load skills and models
   useEffect(() => {
@@ -393,6 +417,73 @@ function AppContent() {
     }
   };
 
+  // ==================== ADMIN HANDLERS ====================
+
+  const handleOpenAdmin = async () => {
+    setCurrentView('admin');
+    setAdminLoading(true);
+    try {
+      const [stats, usersData, logsData, branding] = await Promise.all([
+        getAdminStats(),
+        getAdminUsers({ limit: 20 }),
+        getAuditLogs({ limit: 20 }),
+        getBranding(),
+      ]);
+      setAdminStats(stats);
+      setAdminUsers(usersData.users);
+      setAdminUsersTotal(usersData.total);
+      setAdminAuditLogs(logsData.logs);
+      setAdminAuditTotal(logsData.total);
+      setBrandingForm(branding);
+    } catch (err) {
+      toast.error('Failed to load admin panel');
+    } finally {
+      setAdminLoading(false);
+    }
+  };
+
+  const handleAdminSearchUsers = async (page?: number) => {
+    const p = page !== undefined ? page : adminUsersPage;
+    try {
+      const data = await getAdminUsers({ search: adminUserSearch, plan: adminPlanFilter || undefined, limit: 20, offset: p * 20 });
+      setAdminUsers(data.users);
+      setAdminUsersTotal(data.total);
+    } catch { toast.error('Search failed'); }
+  };
+
+  const handleAdminUpdateUser = async (userId: number, updates: any) => {
+    try {
+      await updateUserAdmin(userId, updates);
+      toast.success('User updated');
+      handleAdminSearchUsers();
+    } catch { toast.error('Update failed'); }
+  };
+
+  const handleAdminDeleteUser = async (userId: number, email: string) => {
+    if (!confirm(`Delete user ${email}? This cannot be undone.`)) return;
+    try {
+      await deleteUserAdmin(userId);
+      toast.success('User deleted');
+      handleAdminSearchUsers();
+    } catch { toast.error('Delete failed'); }
+  };
+
+  const handleSaveBranding = async () => {
+    try {
+      await updateBranding(brandingForm);
+      toast.success('Branding saved');
+    } catch { toast.error('Failed to save branding'); }
+  };
+
+  const handleLoadAuditLogs = async (page?: number) => {
+    const p = page !== undefined ? page : adminAuditPage;
+    try {
+      const data = await getAuditLogs({ action: adminAuditAction || undefined, limit: 20, offset: p * 20 });
+      setAdminAuditLogs(data.logs);
+      setAdminAuditTotal(data.total);
+    } catch { toast.error('Failed to load logs'); }
+  };
+
   const handleGenerateImage = async () => {
     if (!imagePrompt.trim()) {
       toast.error('Please enter an image prompt');
@@ -428,6 +519,657 @@ function AppContent() {
   };
 
   const currentModel = models.find(m => m.id === selectedModel);
+
+  // Admin Panel View
+  if (currentView === 'admin') {
+    return (
+      <div className="min-h-screen bg-background">
+        <Toaster position="top-right" richColors />
+        {/* Admin Header */}
+        <header className="fixed top-0 left-0 right-0 z-40 bg-background/80 backdrop-blur-xl border-b">
+          <div className="flex items-center justify-between h-16 px-4 lg:px-6">
+            <div className="flex items-center gap-3">
+              <Button variant="ghost" size="icon" onClick={() => setCurrentView('app')}>
+                <ArrowLeft className="w-5 h-5" />
+              </Button>
+              <div className="flex items-center gap-2">
+                <Shield className="w-5 h-5 text-primary" />
+                <span className="font-bold">Admin Panel</span>
+              </div>
+            </div>
+            <div className="flex items-center gap-1">
+              {(['overview', 'users', 'audit', 'branding'] as const).map((tab) => (
+                <Button
+                  key={tab}
+                  variant={adminTab === tab ? 'default' : 'ghost'}
+                  size="sm"
+                  onClick={() => setAdminTab(tab)}
+                  className="capitalize"
+                >
+                  {tab === 'overview' && <Activity className="w-3.5 h-3.5 mr-1.5" />}
+                  {tab === 'users' && <Users className="w-3.5 h-3.5 mr-1.5" />}
+                  {tab === 'audit' && <FileBarChart className="w-3.5 h-3.5 mr-1.5" />}
+                  {tab === 'branding' && <Palette className="w-3.5 h-3.5 mr-1.5" />}
+                  {tab}
+                </Button>
+              ))}
+            </div>
+          </div>
+        </header>
+
+        <main className="pt-20 pb-8 px-4 lg:px-6">
+          <div className="max-w-6xl mx-auto">
+            {adminLoading ? (
+              <div className="flex items-center justify-center py-32">
+                <Loader2 className="w-10 h-10 animate-spin" />
+              </div>
+            ) : (
+              <>
+                {/* ==================== OVERVIEW TAB ==================== */}
+                {adminTab === 'overview' && adminStats && (
+                  <div className="space-y-6">
+                    {/* Refresh button */}
+                    <div className="flex items-center justify-between">
+                      <h2 className="text-xl font-bold">System Overview</h2>
+                      <Button variant="outline" size="sm" onClick={handleOpenAdmin}>
+                        <RefreshCw className="w-3.5 h-3.5 mr-1.5" />
+                        Refresh
+                      </Button>
+                    </div>
+
+                    {/* Main stat cards */}
+                    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+                      <Card>
+                        <CardContent className="p-4 text-center">
+                          <Users className="w-5 h-5 mx-auto mb-1 text-blue-500" />
+                          <p className="text-2xl font-bold">{adminStats.total_users}</p>
+                          <p className="text-xs text-muted-foreground">Total Users</p>
+                        </CardContent>
+                      </Card>
+                      <Card>
+                        <CardContent className="p-4 text-center">
+                          <FileText className="w-5 h-5 mx-auto mb-1 text-green-500" />
+                          <p className="text-2xl font-bold">{adminStats.total_documents}</p>
+                          <p className="text-xs text-muted-foreground">Total Docs</p>
+                        </CardContent>
+                      </Card>
+                      <Card>
+                        <CardContent className="p-4 text-center">
+                          <Users className="w-5 h-5 mx-auto mb-1 text-purple-500" />
+                          <p className="text-2xl font-bold">{adminStats.total_teams}</p>
+                          <p className="text-xs text-muted-foreground">Teams</p>
+                        </CardContent>
+                      </Card>
+                      <Card>
+                        <CardContent className="p-4 text-center">
+                          <FileBarChart className="w-5 h-5 mx-auto mb-1 text-orange-500" />
+                          <p className="text-2xl font-bold">{adminStats.total_signatures}</p>
+                          <p className="text-xs text-muted-foreground">Signatures</p>
+                        </CardContent>
+                      </Card>
+                      <Card>
+                        <CardContent className="p-4 text-center">
+                          <Shield className="w-5 h-5 mx-auto mb-1 text-red-500" />
+                          <p className="text-2xl font-bold">{adminStats.admin_count}</p>
+                          <p className="text-xs text-muted-foreground">Admins</p>
+                        </CardContent>
+                      </Card>
+                      <Card>
+                        <CardContent className="p-4 text-center">
+                          <TrendingUp className="w-5 h-5 mx-auto mb-1 text-cyan-500" />
+                          <p className="text-2xl font-bold">{adminStats.marketplace_templates}</p>
+                          <p className="text-xs text-muted-foreground">Marketplace</p>
+                        </CardContent>
+                      </Card>
+                    </div>
+
+                    {/* Growth cards */}
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <Card>
+                        <CardContent className="p-4">
+                          <p className="text-sm font-medium mb-2">User Growth</p>
+                          <div className="space-y-1">
+                            <div className="flex justify-between text-sm">
+                              <span className="text-muted-foreground">Today</span>
+                              <span className="font-medium">{adminStats.users_today}</span>
+                            </div>
+                            <div className="flex justify-between text-sm">
+                              <span className="text-muted-foreground">This Week</span>
+                              <span className="font-medium">{adminStats.users_this_week}</span>
+                            </div>
+                            <div className="flex justify-between text-sm">
+                              <span className="text-muted-foreground">This Month</span>
+                              <span className="font-medium">{adminStats.users_this_month}</span>
+                            </div>
+                          </div>
+                        </CardContent>
+                      </Card>
+                      <Card>
+                        <CardContent className="p-4">
+                          <p className="text-sm font-medium mb-2">Document Growth</p>
+                          <div className="space-y-1">
+                            <div className="flex justify-between text-sm">
+                              <span className="text-muted-foreground">Today</span>
+                              <span className="font-medium">{adminStats.documents_today}</span>
+                            </div>
+                            <div className="flex justify-between text-sm">
+                              <span className="text-muted-foreground">This Week</span>
+                              <span className="font-medium">{adminStats.documents_this_week}</span>
+                            </div>
+                            <div className="flex justify-between text-sm">
+                              <span className="text-muted-foreground">Published</span>
+                              <span className="font-medium">{adminStats.published_documents}</span>
+                            </div>
+                          </div>
+                        </CardContent>
+                      </Card>
+                      <Card>
+                        <CardContent className="p-4">
+                          <p className="text-sm font-medium mb-2">Signatures</p>
+                          <div className="space-y-1">
+                            <div className="flex justify-between text-sm">
+                              <span className="text-muted-foreground">Signed</span>
+                              <span className="font-medium text-green-600">{adminStats.signed_count}</span>
+                            </div>
+                            <div className="flex justify-between text-sm">
+                              <span className="text-muted-foreground">Pending</span>
+                              <span className="font-medium text-yellow-600">{adminStats.pending_signatures}</span>
+                            </div>
+                            <div className="flex justify-between text-sm">
+                              <span className="text-muted-foreground">Downloads</span>
+                              <span className="font-medium">{adminStats.marketplace_downloads}</span>
+                            </div>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    </div>
+
+                    {/* Plan breakdown */}
+                    <Card>
+                      <CardContent className="p-4">
+                        <p className="text-sm font-medium mb-3">Plan Breakdown</p>
+                        <div className="flex items-center gap-4 flex-wrap">
+                          {adminStats.plan_breakdown && Object.entries(adminStats.plan_breakdown).map(([plan, count]) => (
+                            <div key={plan} className="flex items-center gap-2">
+                              <Badge variant={plan === 'enterprise' ? 'default' : plan === 'pro' ? 'secondary' : 'outline'} className="capitalize">
+                                {plan}
+                              </Badge>
+                              <span className="text-lg font-bold">{count as number}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </CardContent>
+                    </Card>
+
+                    {/* Daily charts */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <Card>
+                        <CardContent className="p-4">
+                          <p className="text-sm font-medium mb-3">Daily Signups (7 days)</p>
+                          {adminStats.daily_signups && adminStats.daily_signups.length > 0 ? (
+                            <div className="space-y-1">
+                              {adminStats.daily_signups.map((d: any) => (
+                                <div key={d.date} className="flex items-center gap-2">
+                                  <span className="text-xs text-muted-foreground w-20">{d.date}</span>
+                                  <div className="flex-1 bg-muted rounded-full h-4 overflow-hidden">
+                                    <div
+                                      className="bg-blue-500 h-4 rounded-full transition-all"
+                                      style={{ width: `${Math.max(Math.min((d.count / Math.max(...adminStats.daily_signups.map((x: any) => x.count), 1)) * 100, 100), 5)}%` }}
+                                    />
+                                  </div>
+                                  <span className="text-xs font-medium w-8 text-right">{d.count}</span>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <p className="text-sm text-muted-foreground">No data</p>
+                          )}
+                        </CardContent>
+                      </Card>
+                      <Card>
+                        <CardContent className="p-4">
+                          <p className="text-sm font-medium mb-3">Daily Documents (7 days)</p>
+                          {adminStats.daily_documents && adminStats.daily_documents.length > 0 ? (
+                            <div className="space-y-1">
+                              {adminStats.daily_documents.map((d: any) => (
+                                <div key={d.date} className="flex items-center gap-2">
+                                  <span className="text-xs text-muted-foreground w-20">{d.date}</span>
+                                  <div className="flex-1 bg-muted rounded-full h-4 overflow-hidden">
+                                    <div
+                                      className="bg-green-500 h-4 rounded-full transition-all"
+                                      style={{ width: `${Math.max(Math.min((d.count / Math.max(...adminStats.daily_documents.map((x: any) => x.count), 1)) * 100, 100), 5)}%` }}
+                                    />
+                                  </div>
+                                  <span className="text-xs font-medium w-8 text-right">{d.count}</span>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <p className="text-sm text-muted-foreground">No data</p>
+                          )}
+                        </CardContent>
+                      </Card>
+                    </div>
+
+                    {/* Top models & skills */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <Card>
+                        <CardContent className="p-4">
+                          <p className="text-sm font-medium mb-3">Top Models (System-wide)</p>
+                          {adminStats.top_models && adminStats.top_models.length > 0 ? (
+                            <div className="space-y-2">
+                              {adminStats.top_models.map((m: any) => (
+                                <div key={m.name} className="flex items-center justify-between">
+                                  <span className="text-sm truncate flex-1">{m.name}</span>
+                                  <Badge variant="secondary">{m.count}</Badge>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <p className="text-sm text-muted-foreground">No data</p>
+                          )}
+                        </CardContent>
+                      </Card>
+                      <Card>
+                        <CardContent className="p-4">
+                          <p className="text-sm font-medium mb-3">Top Skills (System-wide)</p>
+                          {adminStats.top_skills && adminStats.top_skills.length > 0 ? (
+                            <div className="space-y-2">
+                              {adminStats.top_skills.map((s: any) => (
+                                <div key={s.name} className="flex items-center justify-between">
+                                  <span className="text-sm truncate flex-1">{s.name}</span>
+                                  <Badge variant="secondary">{s.count}</Badge>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <p className="text-sm text-muted-foreground">No data</p>
+                          )}
+                        </CardContent>
+                      </Card>
+                    </div>
+
+                    {/* Recent signups */}
+                    <Card>
+                      <CardContent className="p-4">
+                        <p className="text-sm font-medium mb-3">Recent Signups</p>
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-sm">
+                            <thead>
+                              <tr className="border-b text-left">
+                                <th className="pb-2 font-medium">Name</th>
+                                <th className="pb-2 font-medium">Email</th>
+                                <th className="pb-2 font-medium">Plan</th>
+                                <th className="pb-2 font-medium">Joined</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {adminStats.recent_signups?.map((u: any) => (
+                                <tr key={u.id} className="border-b last:border-0">
+                                  <td className="py-2">
+                                    <div className="flex items-center gap-1.5">
+                                      {u.name}
+                                      {u.is_admin ? <Shield className="w-3 h-3 text-red-500" /> : null}
+                                    </div>
+                                  </td>
+                                  <td className="py-2 text-muted-foreground">{u.email}</td>
+                                  <td className="py-2">
+                                    <Badge variant={u.plan === 'enterprise' ? 'default' : u.plan === 'pro' ? 'secondary' : 'outline'} className="capitalize text-[10px]">
+                                      {u.plan}
+                                    </Badge>
+                                  </td>
+                                  <td className="py-2 text-muted-foreground text-xs">{new Date(u.created_at).toLocaleDateString()}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </CardContent>
+                    </Card>
+                  </div>
+                )}
+
+                {/* ==================== USERS TAB ==================== */}
+                {adminTab === 'users' && (
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between">
+                      <h2 className="text-xl font-bold">User Management</h2>
+                      <span className="text-sm text-muted-foreground">{adminUsersTotal} total users</span>
+                    </div>
+
+                    {/* Search & filter bar */}
+                    <div className="flex flex-col sm:flex-row gap-2">
+                      <div className="relative flex-1">
+                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+                        <Input
+                          placeholder="Search by name or email..."
+                          value={adminUserSearch}
+                          onChange={(e) => setAdminUserSearch(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === 'Enter') { setAdminUsersPage(0); handleAdminSearchUsers(0); } }}
+                          className="pl-9"
+                        />
+                      </div>
+                      <Select value={adminPlanFilter || 'all'} onValueChange={(v) => { setAdminPlanFilter(v === 'all' ? '' : v); }}>
+                        <SelectTrigger className="w-[140px]">
+                          <SelectValue placeholder="All plans" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="all">All Plans</SelectItem>
+                          <SelectItem value="free">Free</SelectItem>
+                          <SelectItem value="pro">Pro</SelectItem>
+                          <SelectItem value="enterprise">Enterprise</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <Button onClick={() => { setAdminUsersPage(0); handleAdminSearchUsers(0); }}>
+                        <Search className="w-4 h-4 mr-1.5" />
+                        Search
+                      </Button>
+                    </div>
+
+                    {/* Users table */}
+                    <Card>
+                      <CardContent className="p-0">
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-sm">
+                            <thead>
+                              <tr className="border-b bg-muted/50">
+                                <th className="text-left p-3 font-medium">Name</th>
+                                <th className="text-left p-3 font-medium">Email</th>
+                                <th className="text-left p-3 font-medium">Plan</th>
+                                <th className="text-left p-3 font-medium">Admin</th>
+                                <th className="text-left p-3 font-medium">Generations</th>
+                                <th className="text-left p-3 font-medium">Joined</th>
+                                <th className="text-left p-3 font-medium">Actions</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {adminUsers.map((u) => (
+                                <tr key={u.id} className="border-b last:border-0 hover:bg-muted/30">
+                                  <td className="p-3 font-medium">{u.name}</td>
+                                  <td className="p-3 text-muted-foreground">{u.email}</td>
+                                  <td className="p-3">
+                                    <Select
+                                      value={u.plan}
+                                      onValueChange={(v) => handleAdminUpdateUser(u.id, { plan: v })}
+                                    >
+                                      <SelectTrigger className="w-[110px] h-8 text-xs">
+                                        <SelectValue />
+                                      </SelectTrigger>
+                                      <SelectContent>
+                                        <SelectItem value="free">Free</SelectItem>
+                                        <SelectItem value="pro">Pro</SelectItem>
+                                        <SelectItem value="enterprise">Enterprise</SelectItem>
+                                      </SelectContent>
+                                    </Select>
+                                  </td>
+                                  <td className="p-3">
+                                    <Button
+                                      variant={u.is_admin ? 'default' : 'outline'}
+                                      size="sm"
+                                      className="h-8 text-xs"
+                                      onClick={() => handleAdminUpdateUser(u.id, { is_admin: !u.is_admin })}
+                                    >
+                                      {u.is_admin ? (
+                                        <><Shield className="w-3 h-3 mr-1" /> Admin</>
+                                      ) : (
+                                        <><Shield className="w-3 h-3 mr-1" /> User</>
+                                      )}
+                                    </Button>
+                                  </td>
+                                  <td className="p-3 text-center">{u.generation_count || 0}</td>
+                                  <td className="p-3 text-muted-foreground text-xs whitespace-nowrap">{new Date(u.created_at).toLocaleDateString()}</td>
+                                  <td className="p-3">
+                                    <Button
+                                      variant="destructive"
+                                      size="sm"
+                                      className="h-8 text-xs"
+                                      onClick={() => handleAdminDeleteUser(u.id, u.email)}
+                                    >
+                                      <Trash2 className="w-3 h-3 mr-1" />
+                                      Delete
+                                    </Button>
+                                  </td>
+                                </tr>
+                              ))}
+                              {adminUsers.length === 0 && (
+                                <tr>
+                                  <td colSpan={7} className="p-8 text-center text-muted-foreground">No users found</td>
+                                </tr>
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+
+                        {/* Pagination */}
+                        {adminUsersTotal > 20 && (
+                          <div className="flex items-center justify-between p-3 border-t">
+                            <span className="text-xs text-muted-foreground">
+                              Showing {adminUsersPage * 20 + 1}-{Math.min((adminUsersPage + 1) * 20, adminUsersTotal)} of {adminUsersTotal}
+                            </span>
+                            <div className="flex items-center gap-1">
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                disabled={adminUsersPage === 0}
+                                onClick={() => { const p = adminUsersPage - 1; setAdminUsersPage(p); handleAdminSearchUsers(p); }}
+                              >
+                                <ChevronLeft className="w-4 h-4" />
+                              </Button>
+                              <span className="text-sm px-2">Page {adminUsersPage + 1} of {Math.ceil(adminUsersTotal / 20)}</span>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                disabled={(adminUsersPage + 1) * 20 >= adminUsersTotal}
+                                onClick={() => { const p = adminUsersPage + 1; setAdminUsersPage(p); handleAdminSearchUsers(p); }}
+                              >
+                                <ChevronRight className="w-4 h-4" />
+                              </Button>
+                            </div>
+                          </div>
+                        )}
+                      </CardContent>
+                    </Card>
+                  </div>
+                )}
+
+                {/* ==================== AUDIT LOGS TAB ==================== */}
+                {adminTab === 'audit' && (
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between">
+                      <h2 className="text-xl font-bold">Audit Logs</h2>
+                      <span className="text-sm text-muted-foreground">{adminAuditTotal} total entries</span>
+                    </div>
+
+                    {/* Action filter */}
+                    <div className="flex gap-2">
+                      <Select value={adminAuditAction || 'all'} onValueChange={(v) => { setAdminAuditAction(v === 'all' ? '' : v); }}>
+                        <SelectTrigger className="w-[200px]">
+                          <SelectValue placeholder="Filter by action" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="all">All Actions</SelectItem>
+                          <SelectItem value="register">Register</SelectItem>
+                          <SelectItem value="login">Login</SelectItem>
+                          <SelectItem value="generate">Generate</SelectItem>
+                          <SelectItem value="export_pdf">Export PDF</SelectItem>
+                          <SelectItem value="export_docx">Export DOCX</SelectItem>
+                          <SelectItem value="admin_edit_user">Admin Edit User</SelectItem>
+                          <SelectItem value="admin_delete_user">Admin Delete User</SelectItem>
+                          <SelectItem value="update_branding">Update Branding</SelectItem>
+                          <SelectItem value="document_signed">Document Signed</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <Button onClick={() => { setAdminAuditPage(0); handleLoadAuditLogs(0); }}>
+                        <Search className="w-4 h-4 mr-1.5" />
+                        Filter
+                      </Button>
+                      <Button variant="outline" onClick={() => { setAdminAuditAction(''); setAdminAuditPage(0); handleLoadAuditLogs(0); }}>
+                        <RefreshCw className="w-4 h-4 mr-1.5" />
+                        Reset
+                      </Button>
+                    </div>
+
+                    {/* Logs table */}
+                    <Card>
+                      <CardContent className="p-0">
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-sm">
+                            <thead>
+                              <tr className="border-b bg-muted/50">
+                                <th className="text-left p-3 font-medium">Time</th>
+                                <th className="text-left p-3 font-medium">User</th>
+                                <th className="text-left p-3 font-medium">Action</th>
+                                <th className="text-left p-3 font-medium">Details</th>
+                                <th className="text-left p-3 font-medium">IP</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {adminAuditLogs.map((log) => (
+                                <tr key={log.id} className="border-b last:border-0 hover:bg-muted/30">
+                                  <td className="p-3 text-xs text-muted-foreground whitespace-nowrap">
+                                    {new Date(log.created_at).toLocaleString()}
+                                  </td>
+                                  <td className="p-3">
+                                    <div className="text-xs">
+                                      <span className="font-medium">{log.user_name || '—'}</span>
+                                      {log.user_email && (
+                                        <span className="text-muted-foreground ml-1">({log.user_email})</span>
+                                      )}
+                                    </div>
+                                  </td>
+                                  <td className="p-3">
+                                    <Badge variant="outline" className="text-[10px]">{log.action}</Badge>
+                                  </td>
+                                  <td className="p-3 text-xs text-muted-foreground max-w-[300px] truncate" title={log.details || ''}>
+                                    {log.details || '—'}
+                                  </td>
+                                  <td className="p-3 text-xs text-muted-foreground">{log.ip_address || '—'}</td>
+                                </tr>
+                              ))}
+                              {adminAuditLogs.length === 0 && (
+                                <tr>
+                                  <td colSpan={5} className="p-8 text-center text-muted-foreground">No audit logs found</td>
+                                </tr>
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+
+                        {/* Pagination */}
+                        {adminAuditTotal > 20 && (
+                          <div className="flex items-center justify-between p-3 border-t">
+                            <span className="text-xs text-muted-foreground">
+                              Showing {adminAuditPage * 20 + 1}-{Math.min((adminAuditPage + 1) * 20, adminAuditTotal)} of {adminAuditTotal}
+                            </span>
+                            <div className="flex items-center gap-1">
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                disabled={adminAuditPage === 0}
+                                onClick={() => { const p = adminAuditPage - 1; setAdminAuditPage(p); handleLoadAuditLogs(p); }}
+                              >
+                                <ChevronLeft className="w-4 h-4" />
+                              </Button>
+                              <span className="text-sm px-2">Page {adminAuditPage + 1} of {Math.ceil(adminAuditTotal / 20)}</span>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                disabled={(adminAuditPage + 1) * 20 >= adminAuditTotal}
+                                onClick={() => { const p = adminAuditPage + 1; setAdminAuditPage(p); handleLoadAuditLogs(p); }}
+                              >
+                                <ChevronRight className="w-4 h-4" />
+                              </Button>
+                            </div>
+                          </div>
+                        )}
+                      </CardContent>
+                    </Card>
+                  </div>
+                )}
+
+                {/* ==================== BRANDING TAB ==================== */}
+                {adminTab === 'branding' && (
+                  <div className="space-y-6 max-w-2xl">
+                    <h2 className="text-xl font-bold">Site Branding</h2>
+
+                    <Card>
+                      <CardContent className="p-6 space-y-5">
+                        <div className="space-y-2">
+                          <Label>App Name</Label>
+                          <Input
+                            value={brandingForm.app_name || ''}
+                            onChange={(e) => setBrandingForm({ ...brandingForm, app_name: e.target.value })}
+                            placeholder="Universal Document Creator"
+                          />
+                        </div>
+
+                        <div className="space-y-2">
+                          <Label>Tagline</Label>
+                          <Input
+                            value={brandingForm.app_tagline || ''}
+                            onChange={(e) => setBrandingForm({ ...brandingForm, app_tagline: e.target.value })}
+                            placeholder="AI-Powered Document Generation"
+                          />
+                        </div>
+
+                        <div className="space-y-2">
+                          <Label>Primary Color</Label>
+                          <div className="flex items-center gap-3">
+                            <input
+                              type="color"
+                              value={brandingForm.primary_color || '#ea580c'}
+                              onChange={(e) => setBrandingForm({ ...brandingForm, primary_color: e.target.value })}
+                              className="w-10 h-10 rounded border cursor-pointer"
+                            />
+                            <Input
+                              value={brandingForm.primary_color || '#ea580c'}
+                              onChange={(e) => setBrandingForm({ ...brandingForm, primary_color: e.target.value })}
+                              placeholder="#ea580c"
+                              className="flex-1"
+                            />
+                            <div
+                              className="w-20 h-10 rounded border"
+                              style={{ backgroundColor: brandingForm.primary_color || '#ea580c' }}
+                            />
+                          </div>
+                        </div>
+
+                        <div className="space-y-2">
+                          <Label>Support Email</Label>
+                          <Input
+                            type="email"
+                            value={brandingForm.support_email || ''}
+                            onChange={(e) => setBrandingForm({ ...brandingForm, support_email: e.target.value })}
+                            placeholder="support@universaldoc.app"
+                          />
+                        </div>
+
+                        <div className="space-y-2">
+                          <Label>Custom Footer Text</Label>
+                          <Input
+                            value={brandingForm.custom_footer || ''}
+                            onChange={(e) => setBrandingForm({ ...brandingForm, custom_footer: e.target.value })}
+                            placeholder="Optional footer text..."
+                          />
+                        </div>
+
+                        <Separator />
+
+                        <Button onClick={handleSaveBranding} className="w-full">
+                          <Check className="w-4 h-4 mr-2" />
+                          Save Branding
+                        </Button>
+                      </CardContent>
+                    </Card>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        </main>
+      </div>
+    );
+  }
 
   // Dashboard View
   if (currentView === 'dashboard') {
@@ -663,6 +1405,13 @@ function AppContent() {
             {isAuthenticated && (
               <Button variant="outline" size="icon" onClick={handleOpenDashboard} title="Dashboard">
                 <BarChart3 className="w-4 h-4" />
+              </Button>
+            )}
+
+            {/* Admin Panel Button */}
+            {isAuthenticated && user && user.is_admin && (
+              <Button variant="outline" size="icon" onClick={handleOpenAdmin} title="Admin Panel">
+                <Shield className="w-4 h-4" />
               </Button>
             )}
 

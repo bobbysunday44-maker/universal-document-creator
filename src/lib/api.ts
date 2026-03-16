@@ -37,6 +37,7 @@ export interface AuthUser {
   name: string;
   plan: 'free' | 'pro' | 'enterprise';
   created_at: string;
+  is_admin?: boolean;
 }
 
 export interface AuthResponse {
@@ -517,6 +518,65 @@ export async function generateDocumentStream(
       }
     }
   }
+}
+
+// ==================== ADMIN API ====================
+
+export async function getAdminStats(): Promise<any> {
+  const response = await fetch(`${API_BASE_URL}/api/admin/stats`, { headers: authHeaders() });
+  if (!response.ok) throw new Error('Failed to load admin stats');
+  return response.json();
+}
+
+export async function getAdminUsers(params?: { search?: string; plan?: string; limit?: number; offset?: number }): Promise<any> {
+  const searchParams = new URLSearchParams();
+  if (params?.search) searchParams.set('search', params.search);
+  if (params?.plan) searchParams.set('plan', params.plan);
+  if (params?.limit) searchParams.set('limit', String(params.limit));
+  if (params?.offset) searchParams.set('offset', String(params.offset));
+  const response = await fetch(`${API_BASE_URL}/api/admin/users?${searchParams}`, { headers: authHeaders() });
+  if (!response.ok) throw new Error('Failed to load users');
+  return response.json();
+}
+
+export async function updateUserAdmin(userId: number, data: { plan?: string; is_admin?: boolean; generation_count?: number }): Promise<any> {
+  const response = await fetch(`${API_BASE_URL}/api/admin/users/${userId}`, {
+    method: 'PUT', headers: authHeaders(), body: JSON.stringify(data)
+  });
+  if (!response.ok) throw new Error('Failed to update user');
+  return response.json();
+}
+
+export async function deleteUserAdmin(userId: number): Promise<any> {
+  const response = await fetch(`${API_BASE_URL}/api/admin/users/${userId}`, {
+    method: 'DELETE', headers: authHeaders()
+  });
+  if (!response.ok) throw new Error('Failed to delete user');
+  return response.json();
+}
+
+export async function getAuditLogs(params?: { limit?: number; offset?: number; action?: string }): Promise<any> {
+  const searchParams = new URLSearchParams();
+  if (params?.limit) searchParams.set('limit', String(params.limit));
+  if (params?.offset) searchParams.set('offset', String(params.offset));
+  if (params?.action) searchParams.set('action', params.action);
+  const response = await fetch(`${API_BASE_URL}/api/admin/audit-logs?${searchParams}`, { headers: authHeaders() });
+  if (!response.ok) throw new Error('Failed to load audit logs');
+  return response.json();
+}
+
+export async function updateBranding(data: Record<string, string>): Promise<any> {
+  const response = await fetch(`${API_BASE_URL}/api/admin/branding`, {
+    method: 'POST', headers: authHeaders(), body: JSON.stringify(data)
+  });
+  if (!response.ok) throw new Error('Failed to update branding');
+  return response.json();
+}
+
+export async function getBranding(): Promise<any> {
+  const response = await fetch(`${API_BASE_URL}/api/branding`);
+  if (!response.ok) throw new Error('Failed to load branding');
+  return response.json();
 }
 
 // Download helper
