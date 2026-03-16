@@ -1,0 +1,12 @@
+# Universal Document Creator - Robots.txt
+User-agent: *
+Allow: /
+Disallow: /api/
+Disallow: /sign/
+Disallow: /p/
+
+# Sitemap (uncomment and set your domain when deployed)
+# Sitemap: https://yourdomain.com/sitemap.xml
+
+# Crawl-delay
+Crawl-delay: 1
