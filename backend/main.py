@@ -28,6 +28,7 @@ import secrets
 import jwt
 import stripe
 from datetime import datetime, timedelta
+import io
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
 
@@ -311,6 +312,97 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_audit_logs_user ON audit_logs(user_id);
         CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON audit_logs(action);
         CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON audit_logs(created_at);
+
+        CREATE TABLE IF NOT EXISTS document_versions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            document_id INTEGER NOT NULL,
+            content TEXT NOT NULL,
+            version_number INTEGER NOT NULL DEFAULT 1,
+            created_by INTEGER,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE,
+            FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_doc_versions_doc ON document_versions(document_id);
+
+        CREATE TABLE IF NOT EXISTS signature_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            document_id INTEGER NOT NULL,
+            sender_id INTEGER NOT NULL,
+            recipient_email TEXT NOT NULL,
+            recipient_name TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            sign_token TEXT UNIQUE NOT NULL,
+            signed_at TEXT,
+            signature_data TEXT,
+            ip_address TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE,
+            FOREIGN KEY (sender_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_sig_requests_doc ON signature_requests(document_id);
+        CREATE INDEX IF NOT EXISTS idx_sig_requests_token ON signature_requests(sign_token);
+
+        CREATE TABLE IF NOT EXISTS document_views (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            document_id INTEGER NOT NULL,
+            viewer_token TEXT,
+            viewer_ip TEXT,
+            viewer_email TEXT,
+            duration_seconds INTEGER DEFAULT 0,
+            scroll_depth REAL DEFAULT 0,
+            opened_at TEXT NOT NULL DEFAULT (datetime('now')),
+            last_activity TEXT,
+            FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_doc_views_doc ON document_views(document_id);
+
+        CREATE TABLE IF NOT EXISTS voice_profiles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            name TEXT NOT NULL DEFAULT 'My Voice',
+            tone TEXT,
+            formality TEXT,
+            vocabulary_level TEXT,
+            avg_sentence_length TEXT,
+            common_phrases TEXT,
+            writing_rules TEXT,
+            raw_analysis TEXT,
+            sample_count INTEGER DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_voice_profiles_user ON voice_profiles(user_id);
+
+        CREATE TABLE IF NOT EXISTS marketplace_templates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            author_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            description TEXT,
+            category TEXT DEFAULT 'general',
+            skill_content TEXT NOT NULL,
+            tags TEXT,
+            downloads INTEGER DEFAULT 0,
+            rating_sum INTEGER DEFAULT 0,
+            rating_count INTEGER DEFAULT 0,
+            is_approved INTEGER DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS template_reviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            template_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            rating INTEGER NOT NULL CHECK(rating >= 1 AND rating <= 5),
+            review TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY (template_id) REFERENCES marketplace_templates(id) ON DELETE CASCADE,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+            UNIQUE(template_id, user_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_marketplace_category ON marketplace_templates(category);
+        CREATE INDEX IF NOT EXISTS idx_marketplace_author ON marketplace_templates(author_id);
     """)
     conn.commit()
 
@@ -347,6 +439,14 @@ def init_db():
         conn.execute("ALTER TABLE users ADD COLUMN generation_reset TEXT")
     except:
         pass
+    conn.commit()
+
+    # Add web publishing columns to documents
+    for col_sql in ["ALTER TABLE documents ADD COLUMN is_published INTEGER DEFAULT 0",
+                     "ALTER TABLE documents ADD COLUMN publish_slug TEXT",
+                     "ALTER TABLE documents ADD COLUMN publish_password TEXT"]:
+        try: conn.execute(col_sql)
+        except: pass
     conn.commit()
 
     conn.close()
@@ -520,6 +620,7 @@ class DocumentRequest(BaseModel):
     title: Optional[str] = None
     brand_profile_id: Optional[int] = None
     output_format: str = "markdown"  # markdown, html, pdf
+    language: Optional[str] = None  # e.g., "Spanish", "French", "German"
 
 class DocumentResponse(BaseModel):
     content: str
@@ -1677,6 +1778,12 @@ async def update_document(doc_id: int, update: DocumentUpdate, user=Depends(get_
         conn.execute(f"UPDATE documents SET {', '.join(updates)} WHERE id = ? AND user_id = ?", values)
         conn.commit()
 
+        # Save version snapshot
+        version_num = conn.execute("SELECT COUNT(*) as c FROM document_versions WHERE document_id = ?", (doc_id,)).fetchone()["c"] + 1
+        conn.execute("INSERT INTO document_versions (document_id, content, version_number, created_by) VALUES (?, ?, ?, ?)",
+            (doc_id, update.content if update.content is not None else "", version_num, user["id"]))
+        conn.commit()
+
     updated = conn.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone()
     conn.close()
     return dict(updated)
@@ -1692,6 +1799,87 @@ async def delete_document(doc_id: int, user=Depends(get_current_user)):
     conn.commit()
     conn.close()
     return {"message": "Document deleted"}
+
+# ==================== VERSION HISTORY ENDPOINTS ====================
+
+@app.get("/api/documents/{doc_id}/versions")
+async def get_document_versions(doc_id: int, user=Depends(get_current_user)):
+    conn = get_db()
+    doc = conn.execute("SELECT user_id FROM documents WHERE id = ?", (doc_id,)).fetchone()
+    if not doc or doc["user_id"] != user["id"]:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Document not found")
+    versions = conn.execute(
+        "SELECT id, version_number, created_at, LENGTH(content) as content_length FROM document_versions WHERE document_id = ? ORDER BY version_number DESC",
+        (doc_id,)
+    ).fetchall()
+    conn.close()
+    return {"versions": [dict(v) for v in versions]}
+
+@app.get("/api/documents/{doc_id}/versions/{version_id}")
+async def get_document_version(doc_id: int, version_id: int, user=Depends(get_current_user)):
+    conn = get_db()
+    doc = conn.execute("SELECT user_id FROM documents WHERE id = ?", (doc_id,)).fetchone()
+    if not doc or doc["user_id"] != user["id"]:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Document not found")
+    version = conn.execute("SELECT * FROM document_versions WHERE id = ? AND document_id = ?", (version_id, doc_id)).fetchone()
+    conn.close()
+    if not version:
+        raise HTTPException(status_code=404, detail="Version not found")
+    return dict(version)
+
+@app.post("/api/documents/{doc_id}/versions/{version_id}/restore")
+async def restore_document_version(doc_id: int, version_id: int, user=Depends(get_current_user)):
+    conn = get_db()
+    doc = conn.execute("SELECT user_id FROM documents WHERE id = ?", (doc_id,)).fetchone()
+    if not doc or doc["user_id"] != user["id"]:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Document not found")
+    version = conn.execute("SELECT content FROM document_versions WHERE id = ? AND document_id = ?", (version_id, doc_id)).fetchone()
+    if not version:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Version not found")
+    # Save current as new version before restoring
+    current = conn.execute("SELECT content FROM documents WHERE id = ?", (doc_id,)).fetchone()
+    ver_num = conn.execute("SELECT COUNT(*) as c FROM document_versions WHERE document_id = ?", (doc_id,)).fetchone()["c"] + 1
+    conn.execute("INSERT INTO document_versions (document_id, content, version_number, created_by) VALUES (?, ?, ?, ?)",
+        (doc_id, current["content"], ver_num, user["id"]))
+    # Restore
+    conn.execute("UPDATE documents SET content = ?, updated_at = datetime('now') WHERE id = ?", (version["content"], doc_id))
+    conn.commit()
+    conn.close()
+    return {"message": "Version restored", "version_number": ver_num}
+
+# ==================== WEB PUBLISHING ENDPOINTS ====================
+
+@app.post("/api/documents/{doc_id}/publish")
+async def publish_document(doc_id: int, request_data: dict = Body({}), user=Depends(get_current_user)):
+    conn = get_db()
+    doc = conn.execute("SELECT user_id, title FROM documents WHERE id = ?", (doc_id,)).fetchone()
+    if not doc or doc["user_id"] != user["id"]:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Document not found")
+    import secrets as sec
+    slug = request_data.get("slug") or sec.token_urlsafe(8)
+    password = request_data.get("password")
+    conn.execute("UPDATE documents SET is_published = 1, publish_slug = ?, publish_password = ? WHERE id = ?",
+        (slug, password, doc_id))
+    conn.commit()
+    conn.close()
+    return {"message": "Document published", "slug": slug, "url": f"/p/{slug}"}
+
+@app.post("/api/documents/{doc_id}/unpublish")
+async def unpublish_document(doc_id: int, user=Depends(get_current_user)):
+    conn = get_db()
+    doc = conn.execute("SELECT user_id FROM documents WHERE id = ?", (doc_id,)).fetchone()
+    if not doc or doc["user_id"] != user["id"]:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Document not found")
+    conn.execute("UPDATE documents SET is_published = 0 WHERE id = ?", (doc_id,))
+    conn.commit()
+    conn.close()
+    return {"message": "Document unpublished"}
 
 # ==================== GENERATION ENDPOINTS ====================
 
@@ -1849,6 +2037,9 @@ async def generate_document_stream(request: DocumentRequest, user=Depends(get_op
         format_instruction = "\n\nGenerate this as well-formatted Markdown with proper headings, lists, tables, and emphasis."
 
     full_prompt = prompt + format_instruction + brand_style_instruction
+
+    if request.language:
+        full_prompt = f"{full_prompt}\n\nIMPORTANT: Write the entire document in {request.language}."
 
     # Determine provider
     model_id = request.model
@@ -2015,6 +2206,10 @@ async def generate_document(request: DocumentRequest, user=Depends(get_optional_
             )
             conn.commit()
             document_id = cursor.lastrowid
+            # Save initial version
+            conn.execute("INSERT INTO document_versions (document_id, content, version_number, created_by) VALUES (?, ?, 1, ?)",
+                (document_id, content, user["id"] if user else None))
+            conn.commit()
             conn.close()
 
         timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
@@ -2066,6 +2261,9 @@ async def generate_document(request: DocumentRequest, user=Depends(get_optional_
 
     full_prompt = prompt + format_instruction + brand_style_instruction
 
+    if request.language:
+        full_prompt = f"{full_prompt}\n\nIMPORTANT: Write the entire document in {request.language}."
+
     # Generate content
     content = await generate_content(
         prompt=full_prompt,
@@ -2094,6 +2292,10 @@ async def generate_document(request: DocumentRequest, user=Depends(get_optional_
         )
         conn.commit()
         document_id = cursor.lastrowid
+        # Save initial version
+        conn.execute("INSERT INTO document_versions (document_id, content, version_number, created_by) VALUES (?, ?, 1, ?)",
+            (document_id, content, user["id"] if user else None))
+        conn.commit()
         conn.close()
 
     # Auto-save to output folder
@@ -2772,6 +2974,600 @@ async def get_branding():
     return branding
 
 
+# ==================== TEMPLATE MARKETPLACE (#11) ====================
+
+@app.post("/api/marketplace/publish")
+async def publish_template(request_data: dict = Body(...), user=Depends(get_current_user)):
+    name = request_data.get("name", "").strip()
+    description = request_data.get("description", "").strip()
+    category = request_data.get("category", "general")
+    skill_content = request_data.get("skill_content", "").strip()
+    tags = request_data.get("tags", "")
+    if not name or not skill_content:
+        raise HTTPException(status_code=400, detail="Name and skill content required")
+    conn = get_db()
+    cursor = conn.execute(
+        "INSERT INTO marketplace_templates (author_id, name, description, category, skill_content, tags) VALUES (?, ?, ?, ?, ?, ?)",
+        (user["id"], name, description, category, skill_content, tags if isinstance(tags, str) else json.dumps(tags))
+    )
+    conn.commit()
+    conn.close()
+    return {"id": cursor.lastrowid, "message": "Template published"}
+
+@app.get("/api/marketplace")
+async def browse_marketplace(category: Optional[str] = None, search: Optional[str] = None, sort: str = "popular"):
+    conn = get_db()
+    query = """SELECT mt.*, u.name as author_name,
+        CASE WHEN mt.rating_count > 0 THEN ROUND(CAST(mt.rating_sum AS FLOAT) / mt.rating_count, 1) ELSE 0 END as avg_rating
+        FROM marketplace_templates mt JOIN users u ON mt.author_id = u.id WHERE mt.is_approved = 1"""
+    params = []
+    if category:
+        query += " AND mt.category = ?"
+        params.append(category)
+    if search:
+        query += " AND (mt.name LIKE ? OR mt.description LIKE ? OR mt.tags LIKE ?)"
+        params.extend([f"%{search}%"] * 3)
+    if sort == "popular":
+        query += " ORDER BY mt.downloads DESC"
+    elif sort == "rating":
+        query += " ORDER BY avg_rating DESC"
+    elif sort == "newest":
+        query += " ORDER BY mt.created_at DESC"
+    else:
+        query += " ORDER BY mt.downloads DESC"
+    query += " LIMIT 50"
+    templates = conn.execute(query, params).fetchall()
+    conn.close()
+    return {"templates": [dict(t) for t in templates]}
+
+@app.get("/api/marketplace/{template_id}")
+async def get_marketplace_template(template_id: int):
+    conn = get_db()
+    t = conn.execute(
+        "SELECT mt.*, u.name as author_name FROM marketplace_templates mt JOIN users u ON mt.author_id = u.id WHERE mt.id = ?",
+        (template_id,)
+    ).fetchone()
+    if not t:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Template not found")
+    reviews = conn.execute(
+        "SELECT tr.*, u.name as reviewer_name FROM template_reviews tr JOIN users u ON tr.user_id = u.id WHERE tr.template_id = ? ORDER BY tr.created_at DESC LIMIT 10",
+        (template_id,)
+    ).fetchall()
+    conn.close()
+    return {"template": dict(t), "reviews": [dict(r) for r in reviews]}
+
+@app.post("/api/marketplace/{template_id}/install")
+async def install_marketplace_template(template_id: int, user=Depends(get_current_user)):
+    conn = get_db()
+    t = conn.execute("SELECT skill_content FROM marketplace_templates WHERE id = ?", (template_id,)).fetchone()
+    if not t:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Template not found")
+    conn.execute("UPDATE marketplace_templates SET downloads = downloads + 1 WHERE id = ?", (template_id,))
+    conn.commit()
+    conn.close()
+    return {"skill_content": t["skill_content"], "message": "Template installed"}
+
+@app.post("/api/marketplace/{template_id}/review")
+async def review_template(template_id: int, request_data: dict = Body(...), user=Depends(get_current_user)):
+    rating = request_data.get("rating", 0)
+    review_text = request_data.get("review", "")
+    if not 1 <= rating <= 5:
+        raise HTTPException(status_code=400, detail="Rating must be 1-5")
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO template_reviews (template_id, user_id, rating, review) VALUES (?, ?, ?, ?)",
+            (template_id, user["id"], rating, review_text)
+        )
+        conn.execute(
+            "UPDATE marketplace_templates SET rating_sum = rating_sum + ?, rating_count = rating_count + 1 WHERE id = ?",
+            (rating, template_id)
+        )
+        conn.commit()
+    except Exception:
+        conn.close()
+        raise HTTPException(status_code=400, detail="You already reviewed this template")
+    conn.close()
+    return {"message": "Review submitted"}
+
+# ==================== IN-DOCUMENT PAYMENTS (#15) ====================
+
+@app.post("/api/documents/{doc_id}/payment-link")
+async def create_document_payment_link(doc_id: int, request_data: dict = Body(...), user=Depends(get_current_user)):
+    """Create a Stripe payment link embedded in a document"""
+    amount = request_data.get("amount")  # in cents
+    description = request_data.get("description", "Document payment")
+    currency = request_data.get("currency", "usd")
+
+    if not amount or amount < 50:
+        raise HTTPException(status_code=400, detail="Amount must be at least $0.50")
+
+    api_key = STRIPE_SECRET_KEY
+    if not api_key:
+        conn = get_db()
+        row = conn.execute("SELECT value FROM settings WHERE key = 'stripe_secret_key'").fetchone()
+        conn.close()
+        if row:
+            api_key = row["value"]
+    if not api_key:
+        raise HTTPException(status_code=400, detail="Stripe not configured")
+
+    stripe.api_key = api_key
+
+    try:
+        price = stripe.Price.create(
+            unit_amount=amount,
+            currency=currency,
+            product_data={"name": description},
+        )
+        payment_link = stripe.PaymentLink.create(
+            line_items=[{"price": price.id, "quantity": 1}],
+            metadata={"document_id": str(doc_id), "user_id": str(user["id"])}
+        )
+        return {"payment_url": payment_link.url, "amount": amount, "currency": currency}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Stripe error: {str(e)}")
+
+# ==================== AI WORKFLOWS (#16) ====================
+
+@app.get("/api/workflows/templates")
+async def get_workflow_templates():
+    """Get pre-built workflow templates"""
+    return {"workflows": [
+        {
+            "id": "blog_pipeline",
+            "name": "Blog Post Pipeline",
+            "description": "Research \u2192 Outline \u2192 Draft \u2192 Edit \u2192 SEO optimize",
+            "steps": [
+                {"skill_name": None, "prompt_template": "Research the topic: {{topic}} and list 5 key points"},
+                {"skill_name": None, "prompt_template": "Create a detailed outline based on these points:\n{{previous_output}}"},
+                {"skill_name": None, "prompt_template": "Write a full blog post from this outline:\n{{previous_output}}"},
+                {"skill_name": None, "prompt_template": "Edit and improve this blog post for clarity and engagement:\n{{previous_output}}"},
+            ]
+        },
+        {
+            "id": "proposal_workflow",
+            "name": "Business Proposal Workflow",
+            "description": "Company research \u2192 Problem statement \u2192 Solution \u2192 Pricing \u2192 Full proposal",
+            "steps": [
+                {"skill_name": None, "prompt_template": "Research company {{company_name}} and summarize their industry, challenges, and needs"},
+                {"skill_name": "Business Proposal", "prompt_template": "Create a business proposal for {{company_name}} based on this research:\n{{previous_output}}"},
+            ]
+        },
+        {
+            "id": "content_repurpose",
+            "name": "Content Repurposing",
+            "description": "Take one piece of content and create multiple formats",
+            "steps": [
+                {"skill_name": None, "prompt_template": "Summarize the key points from this content:\n{{source_content}}"},
+                {"skill_name": "Email Template", "prompt_template": "Create an email newsletter based on:\n{{previous_output}}"},
+                {"skill_name": "Marketing Copy", "prompt_template": "Create 3 social media posts (Twitter, LinkedIn, Instagram) from:\n{{previous_output}}"},
+            ]
+        },
+        {
+            "id": "legal_review",
+            "name": "Legal Document Review",
+            "description": "Analyze \u2192 Identify issues \u2192 Suggest improvements \u2192 Rewrite",
+            "steps": [
+                {"skill_name": None, "prompt_template": "Analyze this legal document and identify the key terms, obligations, and potential issues:\n{{document_text}}"},
+                {"skill_name": None, "prompt_template": "Based on this analysis, suggest specific improvements and flag any risky clauses:\n{{previous_output}}"},
+                {"skill_name": "Legal Contract", "prompt_template": "Rewrite the document incorporating the suggested improvements:\n{{previous_output}}"},
+            ]
+        },
+    ]}
+
+@app.post("/api/workflows/execute")
+async def execute_workflow(request_data: dict = Body(...), user=Depends(get_optional_user)):
+    """Execute a multi-step workflow"""
+    steps = request_data.get("steps", [])
+    variables = request_data.get("variables", {})
+    model = request_data.get("model", "gemini-3-flash-preview")
+
+    if not steps:
+        raise HTTPException(status_code=400, detail="No steps provided")
+
+    results = []
+    previous_output = ""
+
+    for i, step in enumerate(steps):
+        prompt = step.get("prompt_template", "")
+        # Replace variables
+        for key, value in variables.items():
+            prompt = prompt.replace("{{" + key + "}}", str(value))
+        prompt = prompt.replace("{{previous_output}}", previous_output)
+
+        try:
+            result = await generate_content(prompt, model_id=model, temperature=0.7, max_tokens=2000)
+            previous_output = result
+            results.append({"step": i + 1, "output": result, "status": "success"})
+        except Exception as e:
+            results.append({"step": i + 1, "output": str(e), "status": "error"})
+            break
+
+    return {
+        "results": results,
+        "final_output": previous_output,
+        "steps_completed": len(results),
+        "total_steps": len(steps)
+    }
+
+# ==================== SEO ANALYSIS (#8) ====================
+
+@app.post("/api/analyze/seo")
+async def analyze_seo(request_data: dict = Body(...)):
+    """Analyze content for SEO metrics"""
+    content = request_data.get("content", "")
+    target_keyword = request_data.get("keyword", "")
+
+    if not content:
+        raise HTTPException(status_code=400, detail="Content required")
+
+    import textstat
+
+    # Basic metrics
+    word_count = len(content.split())
+    sentence_count = textstat.sentence_count(content)
+
+    # Readability scores
+    flesch_reading = textstat.flesch_reading_ease(content)
+    flesch_grade = textstat.flesch_kincaid_grade(content)
+    gunning_fog = textstat.gunning_fog(content)
+
+    # Reading time (avg 200 wpm)
+    reading_time_minutes = round(word_count / 200, 1)
+
+    # Keyword analysis
+    keyword_data = None
+    if target_keyword:
+        keyword_lower = target_keyword.lower()
+        content_lower = content.lower()
+        keyword_count = content_lower.count(keyword_lower)
+        keyword_density = round((keyword_count / max(word_count, 1)) * 100, 2)
+
+        # Check keyword in headings
+        lines = content.split('\n')
+        in_h1 = any(keyword_lower in line.lower() for line in lines if line.startswith('# '))
+        in_h2 = any(keyword_lower in line.lower() for line in lines if line.startswith('## '))
+        in_first_100 = keyword_lower in content_lower[:500]
+
+        keyword_data = {
+            "keyword": target_keyword,
+            "count": keyword_count,
+            "density_percent": keyword_density,
+            "in_title": in_h1,
+            "in_subheading": in_h2,
+            "in_introduction": in_first_100,
+            "recommendation": "Good" if 1 <= keyword_density <= 3 else ("Too low — add more mentions" if keyword_density < 1 else "Too high — reduce to avoid keyword stuffing")
+        }
+
+    # Heading structure
+    headings = {"h1": 0, "h2": 0, "h3": 0}
+    for line in content.split('\n'):
+        if line.startswith('### '): headings["h3"] += 1
+        elif line.startswith('## '): headings["h2"] += 1
+        elif line.startswith('# '): headings["h1"] += 1
+
+    # SEO score (0-100)
+    score = 50
+    if word_count >= 300: score += 10
+    if word_count >= 1000: score += 5
+    if headings["h1"] == 1: score += 10
+    if headings["h2"] >= 2: score += 5
+    if 30 <= flesch_reading <= 70: score += 10  # Good readability
+    if keyword_data and 1 <= keyword_data["density_percent"] <= 3: score += 10
+    if keyword_data and keyword_data["in_title"]: score += 5
+    if keyword_data and keyword_data["in_introduction"]: score += 5
+    score = min(score, 100)
+
+    # Readability label
+    if flesch_reading >= 60: readability = "Easy to read"
+    elif flesch_reading >= 30: readability = "Moderate"
+    else: readability = "Difficult"
+
+    return {
+        "seo_score": score,
+        "word_count": word_count,
+        "sentence_count": sentence_count,
+        "reading_time_minutes": reading_time_minutes,
+        "readability": {
+            "flesch_reading_ease": round(flesch_reading, 1),
+            "flesch_kincaid_grade": round(flesch_grade, 1),
+            "gunning_fog_index": round(gunning_fog, 1),
+            "label": readability
+        },
+        "headings": headings,
+        "keyword_analysis": keyword_data,
+        "suggestions": []  # Could be expanded with AI-powered suggestions
+    }
+
+
+# ==================== BRAND VOICE TRAINING (#10) ====================
+
+@app.post("/api/voice/analyze")
+async def analyze_writing_voice(request_data: dict = Body(...), user=Depends(get_current_user)):
+    """Analyze writing samples to extract voice profile"""
+    samples = request_data.get("samples", [])
+    name = request_data.get("name", "My Voice")
+
+    if not samples or len(samples) < 1:
+        raise HTTPException(status_code=400, detail="Provide at least 1 writing sample")
+
+    combined = "\n\n---\n\n".join(samples)
+
+    analysis_prompt = f"""Analyze the following writing samples and extract the author's writing voice profile. Return a JSON object with these exact keys:
+- "tone": one of "professional", "casual", "academic", "friendly", "authoritative", "conversational"
+- "formality": one of "very formal", "formal", "neutral", "informal", "very informal"
+- "vocabulary_level": one of "simple", "moderate", "advanced", "technical"
+- "avg_sentence_length": one of "short (under 15 words)", "medium (15-25 words)", "long (over 25 words)"
+- "common_phrases": array of 3-5 phrases or patterns the author frequently uses
+- "writing_rules": array of 5-8 specific writing rules to follow to match this voice (e.g., "Always use active voice", "Prefer short paragraphs", "Use bullet points for lists")
+
+Writing samples:
+{combined}
+
+Return ONLY valid JSON, no markdown formatting."""
+
+    try:
+        result = await generate_content(analysis_prompt, model_id="gemini-3-flash-preview", temperature=0.3, max_tokens=1000)
+        # Try to parse JSON from result
+        import json as json_mod
+        # Strip markdown code blocks if present
+        clean = result.strip()
+        if clean.startswith("```"): clean = clean.split("\n", 1)[1].rsplit("```", 1)[0]
+        analysis = json_mod.loads(clean)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to analyze voice: {str(e)}")
+
+    # Save to DB
+    conn = get_db()
+    cursor = conn.execute(
+        """INSERT INTO voice_profiles (user_id, name, tone, formality, vocabulary_level, avg_sentence_length, common_phrases, writing_rules, raw_analysis, sample_count)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (user["id"], name,
+         analysis.get("tone", ""),
+         analysis.get("formality", ""),
+         analysis.get("vocabulary_level", ""),
+         analysis.get("avg_sentence_length", ""),
+         json.dumps(analysis.get("common_phrases", [])),
+         json.dumps(analysis.get("writing_rules", [])),
+         json.dumps(analysis),
+         len(samples))
+    )
+    conn.commit()
+    profile_id = cursor.lastrowid
+    conn.close()
+
+    return {"id": profile_id, "name": name, "analysis": analysis}
+
+@app.get("/api/voice/profiles")
+async def get_voice_profiles(user=Depends(get_current_user)):
+    conn = get_db()
+    profiles = conn.execute(
+        "SELECT id, name, tone, formality, vocabulary_level, sample_count, created_at FROM voice_profiles WHERE user_id = ? ORDER BY created_at DESC",
+        (user["id"],)
+    ).fetchall()
+    conn.close()
+    return {"profiles": [dict(p) for p in profiles]}
+
+@app.get("/api/voice/profiles/{profile_id}")
+async def get_voice_profile(profile_id: int, user=Depends(get_current_user)):
+    conn = get_db()
+    profile = conn.execute("SELECT * FROM voice_profiles WHERE id = ? AND user_id = ?", (profile_id, user["id"])).fetchone()
+    conn.close()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Voice profile not found")
+    result = dict(profile)
+    for key in ["common_phrases", "writing_rules", "raw_analysis"]:
+        if result.get(key):
+            try: result[key] = json.loads(result[key])
+            except: pass
+    return result
+
+@app.delete("/api/voice/profiles/{profile_id}")
+async def delete_voice_profile(profile_id: int, user=Depends(get_current_user)):
+    conn = get_db()
+    conn.execute("DELETE FROM voice_profiles WHERE id = ? AND user_id = ?", (profile_id, user["id"]))
+    conn.commit()
+    conn.close()
+    return {"message": "Voice profile deleted"}
+
+
+# ==================== MULTI-LANGUAGE (#12) ====================
+
+@app.get("/api/languages")
+async def get_supported_languages():
+    return {"languages": [
+        "English", "Spanish", "French", "German", "Italian", "Portuguese",
+        "Dutch", "Russian", "Chinese (Simplified)", "Chinese (Traditional)",
+        "Japanese", "Korean", "Arabic", "Hindi", "Turkish", "Polish",
+        "Swedish", "Norwegian", "Danish", "Finnish", "Greek", "Czech",
+        "Romanian", "Hungarian", "Thai", "Vietnamese", "Indonesian", "Malay"
+    ]}
+
+
+# ==================== BUILT-IN E-SIGNATURES ====================
+
+@app.post("/api/documents/{doc_id}/signature-request")
+async def create_signature_request(doc_id: int, request_data: dict = Body(...), user=Depends(get_current_user)):
+    """Create a signature request for a document"""
+    conn = get_db()
+    doc = conn.execute("SELECT user_id, title FROM documents WHERE id = ?", (doc_id,)).fetchone()
+    if not doc or doc["user_id"] != user["id"]:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    import secrets as sec
+    sign_token = sec.token_urlsafe(32)
+    recipient_email = request_data.get("recipient_email", "").strip()
+    recipient_name = request_data.get("recipient_name", "").strip()
+
+    if not recipient_email:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Recipient email required")
+
+    cursor = conn.execute(
+        "INSERT INTO signature_requests (document_id, sender_id, recipient_email, recipient_name, sign_token) VALUES (?, ?, ?, ?, ?)",
+        (doc_id, user["id"], recipient_email, recipient_name, sign_token)
+    )
+    conn.commit()
+    conn.close()
+
+    return {"id": cursor.lastrowid, "sign_token": sign_token, "sign_url": f"/sign/{sign_token}", "status": "pending"}
+
+@app.get("/api/documents/{doc_id}/signature-requests")
+async def get_signature_requests(doc_id: int, user=Depends(get_current_user)):
+    """Get all signature requests for a document"""
+    conn = get_db()
+    doc = conn.execute("SELECT user_id FROM documents WHERE id = ?", (doc_id,)).fetchone()
+    if not doc or doc["user_id"] != user["id"]:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Document not found")
+    requests_list = conn.execute(
+        "SELECT id, recipient_email, recipient_name, status, signed_at, created_at FROM signature_requests WHERE document_id = ? ORDER BY created_at DESC",
+        (doc_id,)
+    ).fetchall()
+    conn.close()
+    return {"requests": [dict(r) for r in requests_list]}
+
+@app.get("/sign/{sign_token}")
+async def view_signature_page(sign_token: str):
+    """Public page where recipient can view and sign document"""
+    conn = get_db()
+    req = conn.execute(
+        "SELECT sr.*, d.title, d.content, d.html_content, u.name as sender_name FROM signature_requests sr JOIN documents d ON sr.document_id = d.id JOIN users u ON sr.sender_id = u.id WHERE sr.sign_token = ?",
+        (sign_token,)
+    ).fetchone()
+    conn.close()
+    if not req:
+        raise HTTPException(status_code=404, detail="Signature request not found")
+    if req["status"] == "signed":
+        return HTMLResponse(f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Already Signed</title>
+<style>body{{font-family:'Segoe UI',sans-serif;max-width:600px;margin:80px auto;text-align:center;color:#1a1a2e}}.badge{{background:#10b981;color:white;padding:8px 24px;border-radius:20px;display:inline-block;margin:20px 0}}</style>
+</head><body><h1>{req["title"]}</h1><div class="badge">Signed on {req["signed_at"]}</div><p>This document was signed by {req["recipient_name"] or req["recipient_email"]}.</p></body></html>""")
+
+    html_content = req["html_content"] or markdown_to_html(req["content"])
+    return HTMLResponse(f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sign: {req["title"]}</title>
+<style>
+body{{font-family:'Segoe UI',sans-serif;max-width:800px;margin:0 auto;padding:20px;color:#1a1a2e}}
+.doc-content{{border:1px solid #e2e8f0;padding:24px;border-radius:8px;margin:20px 0;line-height:1.6}}
+h1{{color:#0f172a}}
+.sign-section{{background:#f8fafc;border:2px dashed #e2e8f0;border-radius:12px;padding:24px;text-align:center;margin:24px 0}}
+canvas{{border:2px solid #0f172a;border-radius:8px;cursor:crosshair;background:white;touch-action:none}}
+button{{padding:12px 32px;border:none;border-radius:8px;cursor:pointer;font-size:16px;font-weight:600}}
+.btn-sign{{background:#ea580c;color:white}}.btn-sign:hover{{background:#c2410c}}
+.btn-clear{{background:#e2e8f0;color:#334155;margin-right:12px}}.btn-clear:hover{{background:#cbd5e1}}
+.info{{color:#64748b;font-size:14px;margin:8px 0}}
+</style></head><body>
+<h1>Signature Request</h1>
+<p class="info">From: {req["sender_name"]} &bull; To: {req["recipient_name"] or req["recipient_email"]}</p>
+<div class="doc-content">{html_content}</div>
+<div class="sign-section">
+<h3>Your Signature</h3>
+<p class="info">Draw your signature below</p>
+<canvas id="sigCanvas" width="500" height="200"></canvas><br><br>
+<button class="btn-clear" onclick="clearSig()">Clear</button>
+<button class="btn-sign" onclick="submitSig()">Sign Document</button>
+</div>
+<script>
+const c=document.getElementById('sigCanvas'),ctx=c.getContext('2d');let drawing=false,lastX=0,lastY=0;
+ctx.strokeStyle='#0f172a';ctx.lineWidth=2;ctx.lineCap='round';
+c.addEventListener('mousedown',e=>{{drawing=true;[lastX,lastY]=[e.offsetX,e.offsetY]}});
+c.addEventListener('mousemove',e=>{{if(!drawing)return;ctx.beginPath();ctx.moveTo(lastX,lastY);ctx.lineTo(e.offsetX,e.offsetY);ctx.stroke();[lastX,lastY]=[e.offsetX,e.offsetY]}});
+c.addEventListener('mouseup',()=>drawing=false);c.addEventListener('mouseout',()=>drawing=false);
+c.addEventListener('touchstart',e=>{{e.preventDefault();const t=e.touches[0],r=c.getBoundingClientRect();drawing=true;[lastX,lastY]=[t.clientX-r.left,t.clientY-r.top]}});
+c.addEventListener('touchmove',e=>{{e.preventDefault();if(!drawing)return;const t=e.touches[0],r=c.getBoundingClientRect();const x=t.clientX-r.left,y=t.clientY-r.top;ctx.beginPath();ctx.moveTo(lastX,lastY);ctx.lineTo(x,y);ctx.stroke();[lastX,lastY]=[x,y]}});
+c.addEventListener('touchend',()=>drawing=false);
+function clearSig(){{ctx.clearRect(0,0,c.width,c.height)}}
+function submitSig(){{
+  const data=c.toDataURL('image/png');
+  if(ctx.getImageData(0,0,c.width,c.height).data.every((v,i)=>i%4===3?true:v===0)){{alert('Please draw your signature first');return}}
+  fetch('/api/signatures/sign',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{token:'{sign_token}',signature_data:data}})}})
+  .then(r=>r.json()).then(d=>{{if(d.message){{document.body.innerHTML='<div style="text-align:center;padding:80px 20px"><h1 style="color:#10b981">Signed Successfully</h1><p>Thank you for signing this document.</p></div>'}}else{{alert(d.detail||"Error signing")}}}})
+  .catch(()=>alert('Failed to submit signature'))
+}}
+</script></body></html>""")
+
+@app.post("/api/signatures/sign")
+async def submit_signature(request_data: dict = Body(...), request: Request = None):
+    """Submit a signature for a document"""
+    token = request_data.get("token", "")
+    signature_data = request_data.get("signature_data", "")
+    if not token or not signature_data:
+        raise HTTPException(status_code=400, detail="Token and signature required")
+
+    conn = get_db()
+    req = conn.execute("SELECT id, status FROM signature_requests WHERE sign_token = ?", (token,)).fetchone()
+    if not req:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Invalid token")
+    if req["status"] == "signed":
+        conn.close()
+        raise HTTPException(status_code=400, detail="Already signed")
+
+    ip = request.client.host if request and request.client else "unknown"
+    conn.execute(
+        "UPDATE signature_requests SET status = 'signed', signed_at = datetime('now'), signature_data = ?, ip_address = ? WHERE id = ?",
+        (signature_data, ip, req["id"])
+    )
+    conn.commit()
+    conn.close()
+    try: log_audit(None, "document_signed", f"Token: {token[:8]}..., IP: {ip}")
+    except: pass
+    return {"message": "Document signed successfully"}
+
+
+# ==================== DOCUMENT VIEWER ANALYTICS ====================
+
+@app.get("/api/documents/{doc_id}/analytics")
+async def get_document_analytics(doc_id: int, user=Depends(get_current_user)):
+    """Get analytics for a document"""
+    conn = get_db()
+    doc = conn.execute("SELECT user_id FROM documents WHERE id = ?", (doc_id,)).fetchone()
+    if not doc or doc["user_id"] != user["id"]:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    views = conn.execute(
+        "SELECT id, viewer_ip, viewer_email, duration_seconds, scroll_depth, opened_at FROM document_views WHERE document_id = ? ORDER BY opened_at DESC LIMIT 50",
+        (doc_id,)
+    ).fetchall()
+    total = conn.execute("SELECT COUNT(*) as c FROM document_views WHERE document_id = ?", (doc_id,)).fetchone()["c"]
+    avg_duration = conn.execute("SELECT AVG(duration_seconds) as avg FROM document_views WHERE document_id = ? AND duration_seconds > 0", (doc_id,)).fetchone()["avg"]
+    avg_scroll = conn.execute("SELECT AVG(scroll_depth) as avg FROM document_views WHERE document_id = ? AND scroll_depth > 0", (doc_id,)).fetchone()["avg"]
+
+    conn.close()
+    return {
+        "total_views": total,
+        "avg_duration_seconds": round(avg_duration or 0, 1),
+        "avg_scroll_depth": round((avg_scroll or 0) * 100, 1),
+        "views": [dict(v) for v in views]
+    }
+
+@app.post("/api/track/view")
+async def track_document_view(request_data: dict = Body(...), request: Request = None):
+    """Track a document view (called from published/shared pages)"""
+    doc_id = request_data.get("document_id")
+    duration = request_data.get("duration_seconds", 0)
+    scroll_depth = request_data.get("scroll_depth", 0)
+    viewer_email = request_data.get("viewer_email")
+
+    if not doc_id:
+        raise HTTPException(status_code=400, detail="document_id required")
+
+    ip = request.client.host if request and request.client else "unknown"
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO document_views (document_id, viewer_ip, viewer_email, duration_seconds, scroll_depth) VALUES (?, ?, ?, ?, ?)",
+        (doc_id, ip, viewer_email, duration, scroll_depth)
+    )
+    conn.commit()
+    conn.close()
+    return {"message": "View tracked"}
+
+
 # ==================== HEALTH CHECK ====================
 
 @app.get("/api/health")
@@ -2807,9 +3603,253 @@ async def health_check():
 
     return status
 
+
+# ==================== PRESENTATION / SLIDE GENERATION ====================
+
+@app.post("/api/generate/presentation")
+async def generate_presentation(request_data: dict = Body(...), user=Depends(get_optional_user)):
+    """Generate a PowerPoint presentation from a prompt"""
+    prompt = request_data.get("prompt", "")
+    slide_count = request_data.get("slide_count", 8)
+    model = request_data.get("model", "gemini-3-flash-preview")
+
+    if not prompt:
+        raise HTTPException(status_code=400, detail="Prompt required")
+
+    # Ask AI to generate slide structure as JSON
+    slide_prompt = f"""Create a {slide_count}-slide presentation about: {prompt}
+
+Return ONLY a JSON array of slides. Each slide object must have:
+- "title": string (slide title)
+- "content": array of strings (bullet points, 3-5 per slide)
+- "notes": string (speaker notes, 1-2 sentences)
+- "layout": one of "title", "content", "two_column", "section", "quote"
+
+Slide 1 should be layout "title" with the presentation title.
+Last slide should be layout "section" as a thank you/Q&A slide.
+
+Return ONLY the JSON array, no markdown formatting."""
+
+    try:
+        result = await generate_content(slide_prompt, model_id=model, temperature=0.7, max_tokens=3000)
+        clean = result.strip()
+        if clean.startswith("```"):
+            clean = clean.split("\n", 1)[1].rsplit("```", 1)[0]
+        slides = json.loads(clean)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate slides: {str(e)}")
+
+    # Generate PPTX
+    from pptx import Presentation as PptxPresentation
+    from pptx.util import Inches, Pt
+    from pptx.dml.color import RGBColor
+    from pptx.enum.text import PP_ALIGN
+
+    prs = PptxPresentation()
+    prs.slide_width = Inches(13.333)
+    prs.slide_height = Inches(7.5)
+
+    for i, slide_data in enumerate(slides):
+        layout_name = slide_data.get("layout", "content")
+        title_text = slide_data.get("title", f"Slide {i+1}")
+        content_items = slide_data.get("content", [])
+        notes_text = slide_data.get("notes", "")
+
+        if layout_name == "title":
+            layout = prs.slide_layouts[0]  # Title slide
+            slide = prs.slides.add_slide(layout)
+            slide.shapes.title.text = title_text
+            if slide.placeholders[1]:
+                slide.placeholders[1].text = "\n".join(content_items) if content_items else ""
+        elif layout_name == "section":
+            layout = prs.slide_layouts[2]  # Section header
+            slide = prs.slides.add_slide(layout)
+            slide.shapes.title.text = title_text
+        else:
+            layout = prs.slide_layouts[1]  # Title and content
+            slide = prs.slides.add_slide(layout)
+            slide.shapes.title.text = title_text
+            if len(slide.placeholders) > 1:
+                tf = slide.placeholders[1].text_frame
+                tf.clear()
+                for j, item in enumerate(content_items):
+                    if j == 0:
+                        tf.paragraphs[0].text = item
+                    else:
+                        p = tf.add_paragraph()
+                        p.text = item
+                    tf.paragraphs[j].level = 0
+
+        # Add speaker notes
+        if notes_text:
+            slide.notes_slide.notes_text_frame.text = notes_text
+
+    # Save to bytes
+    buffer = io.BytesIO()
+    prs.save(buffer)
+    buffer.seek(0)
+    pptx_bytes = buffer.read()
+
+    # Save to output dir
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    filename = f"Presentation_{timestamp}.pptx"
+    save_path = os.path.join(OUTPUT_DIR, filename)
+    with open(save_path, "wb") as f:
+        f.write(pptx_bytes)
+
+    # Return as downloadable
+    return Response(
+        content=pptx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
+
+
+@app.post("/api/generate/presentation/preview")
+async def preview_presentation(request_data: dict = Body(...), user=Depends(get_optional_user)):
+    """Generate presentation structure as JSON (for preview)"""
+    prompt = request_data.get("prompt", "")
+    slide_count = request_data.get("slide_count", 8)
+    model = request_data.get("model", "gemini-3-flash-preview")
+
+    if not prompt:
+        raise HTTPException(status_code=400, detail="Prompt required")
+
+    slide_prompt = f"""Create a {slide_count}-slide presentation about: {prompt}
+
+Return ONLY a JSON array of slides. Each slide object must have:
+- "title": string
+- "content": array of strings (bullet points)
+- "notes": string (speaker notes)
+- "layout": one of "title", "content", "two_column", "section", "quote"
+
+Return ONLY the JSON array, no markdown."""
+
+    result = await generate_content(slide_prompt, model_id=model, temperature=0.7, max_tokens=3000)
+    clean = result.strip()
+    if clean.startswith("```"):
+        clean = clean.split("\n", 1)[1].rsplit("```", 1)[0]
+    slides = json.loads(clean)
+
+    return {"slides": slides, "count": len(slides)}
+
+
+# ==================== BULK BATCH GENERATION ====================
+
+@app.post("/api/generate/batch")
+async def batch_generate(
+    file: UploadFile = File(...),
+    skill_name: str = Form(None),
+    prompt_template: str = Form(...),
+    model: str = Form("gemini-3-flash-preview"),
+    user=Depends(get_current_user)
+):
+    """Bulk generate documents from CSV data. Use {{column_name}} as merge fields in prompt_template."""
+    import pandas as pd
+    import zipfile
+
+    # Read CSV
+    content = await file.read()
+    try:
+        df = pd.read_csv(io.BytesIO(content))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid CSV: {str(e)}")
+
+    if len(df) > 100:
+        raise HTTPException(status_code=400, detail="Maximum 100 rows per batch")
+    if len(df) == 0:
+        raise HTTPException(status_code=400, detail="CSV is empty")
+
+    # Generate documents
+    results = []
+    errors = []
+
+    for idx, row in df.iterrows():
+        try:
+            # Replace merge fields in template
+            filled_prompt = prompt_template
+            for col in df.columns:
+                filled_prompt = filled_prompt.replace(f"{{{{{col}}}}}", str(row[col]))
+
+            # Generate
+            result = await generate_content(filled_prompt, model_id=model, temperature=0.7, max_tokens=2000)
+            results.append({"row": idx + 1, "content": result, "status": "success"})
+        except Exception as e:
+            errors.append({"row": idx + 1, "error": str(e)})
+            results.append({"row": idx + 1, "content": f"Error: {str(e)}", "status": "error"})
+
+    # Create ZIP with all documents
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for r in results:
+            if r["status"] == "success":
+                filename = f"document_row_{r['row']}.md"
+                zf.writestr(filename, r["content"])
+
+        # Include summary
+        summary = f"Batch Generation Summary\n{'='*40}\n"
+        summary += f"Total rows: {len(df)}\n"
+        summary += f"Successful: {sum(1 for r in results if r['status']=='success')}\n"
+        summary += f"Errors: {len(errors)}\n"
+        if errors:
+            summary += f"\nErrors:\n"
+            for e in errors:
+                summary += f"  Row {e['row']}: {e['error']}\n"
+        zf.writestr("_summary.txt", summary)
+
+    zip_buffer.seek(0)
+
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    return Response(
+        content=zip_buffer.read(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="batch_{timestamp}.zip"'}
+    )
+
+
+@app.post("/api/batch/preview")
+async def preview_batch_csv(file: UploadFile = File(...)):
+    """Preview CSV columns and first 3 rows"""
+    import pandas as pd
+    content = await file.read()
+    try:
+        df = pd.read_csv(io.BytesIO(content))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid CSV: {str(e)}")
+
+    return {
+        "columns": list(df.columns),
+        "row_count": len(df),
+        "preview_rows": df.head(3).to_dict(orient="records"),
+        "merge_fields": [f"{{{{{col}}}}}" for col in df.columns]
+    }
+
+
 # ==================== STATIC FILE SERVING (Desktop Mode) ====================
 
 DIST_DIR = os.path.join(os.path.dirname(__file__), "..", "dist")
+
+@app.get("/p/{slug}")
+async def view_published_document(slug: str, request: Request):
+    conn = get_db()
+    doc = conn.execute("SELECT * FROM documents WHERE publish_slug = ? AND is_published = 1", (slug,)).fetchone()
+    conn.close()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    # Log view
+    try: log_audit(None, "doc_view", f"Slug: {slug}, IP: {request.client.host}")
+    except: pass
+    html_content = doc["html_content"] or markdown_to_html(doc["content"])
+    return HTMLResponse(f"""<!DOCTYPE html><html><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{doc["title"]}</title>
+<style>body{{font-family:'Segoe UI',system-ui,sans-serif;max-width:800px;margin:40px auto;padding:20px;line-height:1.6;color:#1a1a2e}}
+h1{{color:#0f172a;border-bottom:2px solid #e2e8f0;padding-bottom:8px}}h2{{color:#1e293b}}h3{{color:#334155}}
+table{{border-collapse:collapse;width:100%;margin:16px 0}}th,td{{border:1px solid #e2e8f0;padding:8px 12px}}
+th{{background:#f8fafc}}code{{background:#f1f5f9;padding:2px 6px;border-radius:4px}}
+blockquote{{border-left:4px solid #e2e8f0;margin:16px 0;padding:8px 16px;color:#64748b}}
+.footer{{text-align:center;margin-top:40px;padding-top:20px;border-top:1px solid #e2e8f0;color:#94a3b8;font-size:12px}}</style>
+</head><body>{html_content}<div class="footer">Published with Universal Document Creator</div></body></html>""")
 
 if os.path.isdir(DIST_DIR):
     # Serve static assets (JS, CSS, images)
