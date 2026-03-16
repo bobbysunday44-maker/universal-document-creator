@@ -21,6 +21,7 @@ import {
   getImageModels, generateImage,
   getDashboard,
   getAdminStats, getAdminUsers, updateUserAdmin, deleteUserAdmin, getAuditLogs, updateBranding, getBranding,
+  getPendingUsers, approveUser, rejectUser,
   type BrandProfile, type SavedDocument
 } from '@/lib/api';
 import { Button } from '@/components/ui/button';
@@ -155,6 +156,10 @@ function AppContent() {
   const [adminLoading, setAdminLoading] = useState(false);
   const [brandingForm, setBrandingForm] = useState<Record<string, string>>({});
 
+  // Pending approvals state
+  const [pendingUsers, setPendingUsers] = useState<any[]>([]);
+  const [pendingCount, setPendingCount] = useState(0);
+
   // Load skills and models
   useEffect(() => {
     loadInitialData();
@@ -166,6 +171,22 @@ function AppContent() {
       loadUserData();
     }
   }, [isAuthenticated]);
+
+  // Poll for pending approvals if admin
+  useEffect(() => {
+    if (isAuthenticated && user && (user as any).is_admin) {
+      const loadPending = async () => {
+        try {
+          const data = await getPendingUsers();
+          setPendingCount(data.count);
+          setPendingUsers(data.pending_users);
+        } catch {}
+      };
+      loadPending();
+      const interval = setInterval(loadPending, 60000);
+      return () => clearInterval(interval);
+    }
+  }, [isAuthenticated, user]);
 
   async function loadInitialData() {
     try {
@@ -423,11 +444,12 @@ function AppContent() {
     setCurrentView('admin');
     setAdminLoading(true);
     try {
-      const [stats, usersData, logsData, branding] = await Promise.all([
+      const [stats, usersData, logsData, branding, pendingData] = await Promise.all([
         getAdminStats(),
         getAdminUsers({ limit: 20 }),
         getAuditLogs({ limit: 20 }),
         getBranding(),
+        getPendingUsers(),
       ]);
       setAdminStats(stats);
       setAdminUsers(usersData.users);
@@ -435,6 +457,8 @@ function AppContent() {
       setAdminAuditLogs(logsData.logs);
       setAdminAuditTotal(logsData.total);
       setBrandingForm(branding);
+      setPendingUsers(pendingData.pending_users);
+      setPendingCount(pendingData.count);
     } catch (err) {
       toast.error('Failed to load admin panel');
     } finally {
@@ -576,6 +600,52 @@ function AppContent() {
                         Refresh
                       </Button>
                     </div>
+
+                    {/* Pending Approvals */}
+                    {pendingUsers.length > 0 && (
+                      <Card className="border-orange-300 bg-orange-50">
+                        <CardContent className="p-4">
+                          <div className="flex items-center justify-between mb-3">
+                            <h3 className="text-sm font-semibold text-orange-700 flex items-center gap-2">
+                              <Users className="w-4 h-4" />
+                              Pending Approvals ({pendingUsers.length})
+                            </h3>
+                          </div>
+                          <div className="space-y-2">
+                            {pendingUsers.map((pu) => (
+                              <div key={pu.id} className="flex items-center justify-between p-2 bg-white rounded-lg border">
+                                <div>
+                                  <p className="text-sm font-medium">{pu.name}</p>
+                                  <p className="text-xs text-muted-foreground">{pu.email} — {new Date(pu.created_at).toLocaleDateString()}</p>
+                                </div>
+                                <div className="flex gap-2">
+                                  <Button size="sm" variant="default" onClick={async () => {
+                                    try {
+                                      await approveUser(pu.id);
+                                      toast.success(`${pu.name} approved`);
+                                      setPendingUsers(prev => prev.filter(u => u.id !== pu.id));
+                                      setPendingCount(prev => prev - 1);
+                                    } catch { toast.error('Failed to approve'); }
+                                  }}>
+                                    Approve
+                                  </Button>
+                                  <Button size="sm" variant="destructive" onClick={async () => {
+                                    try {
+                                      await rejectUser(pu.id);
+                                      toast.success(`${pu.name} rejected`);
+                                      setPendingUsers(prev => prev.filter(u => u.id !== pu.id));
+                                      setPendingCount(prev => prev - 1);
+                                    } catch { toast.error('Failed to reject'); }
+                                  }}>
+                                    Reject
+                                  </Button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </CardContent>
+                      </Card>
+                    )}
 
                     {/* Main stat cards */}
                     <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
@@ -1410,8 +1480,13 @@ function AppContent() {
 
             {/* Admin Panel Button */}
             {isAuthenticated && user && user.is_admin && (
-              <Button variant="outline" size="icon" onClick={handleOpenAdmin} title="Admin Panel">
+              <Button variant="outline" size="icon" onClick={handleOpenAdmin} title="Admin Panel" className="relative">
                 <Shield className="w-4 h-4" />
+                {pendingCount > 0 && (
+                  <span className="absolute -top-1 -right-1 w-4 h-4 bg-red-500 text-white text-[10px] font-bold rounded-full flex items-center justify-center">
+                    {pendingCount}
+                  </span>
+                )}
               </Button>
             )}
 

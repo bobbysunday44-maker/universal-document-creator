@@ -81,9 +81,19 @@ export function AuthModal({ isOpen, onClose, defaultMode = 'login' }: AuthModalP
           setIsLoading(false);
           return;
         }
-        await register(formData.name, formData.email, formData.password);
-        toast.success('Account created successfully!');
-        onClose();
+        try {
+          await register(formData.name, formData.email, formData.password);
+          toast.success('Account created successfully!');
+          onClose();
+        } catch (regError) {
+          const msg = regError instanceof Error ? regError.message : '';
+          if (msg.includes('pending') || msg.includes('approval')) {
+            toast.success('Account created! Waiting for admin approval. You will be notified when approved.');
+            onClose();
+          } else {
+            throw regError;
+          }
+        }
       } else if (mode === 'forgot') {
         await handleForgotPassword();
       } else if (mode === 'reset') {

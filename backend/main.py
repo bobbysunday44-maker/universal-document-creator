@@ -449,6 +449,13 @@ def init_db():
         except: pass
     conn.commit()
 
+    # Add approval column for user registration approval flow
+    try:
+        conn.execute("ALTER TABLE users ADD COLUMN is_approved INTEGER DEFAULT 1")
+    except:
+        pass
+    conn.commit()
+
     conn.close()
 
 @app.on_event("startup")
@@ -554,7 +561,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     payload = verify_token(credentials.credentials)
     user_id = payload.get("sub")
     conn = get_db()
-    user = conn.execute("SELECT id, email, name, plan, created_at, is_admin FROM users WHERE id = ?", (user_id,)).fetchone()
+    user = conn.execute("SELECT id, email, name, plan, created_at, is_admin, is_approved FROM users WHERE id = ?", (user_id,)).fetchone()
     conn.close()
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
@@ -567,7 +574,7 @@ async def get_optional_user(credentials: HTTPAuthorizationCredentials = Depends(
         payload = verify_token(credentials.credentials)
         user_id = payload.get("sub")
         conn = get_db()
-        user = conn.execute("SELECT id, email, name, plan, created_at, is_admin FROM users WHERE id = ?", (user_id,)).fetchone()
+        user = conn.execute("SELECT id, email, name, plan, created_at, is_admin, is_approved FROM users WHERE id = ?", (user_id,)).fetchone()
         conn.close()
         if user:
             return dict(user)
@@ -1282,7 +1289,7 @@ def apply_skill_template(skill: SkillDefinition, parameters: Dict[str, Any]) -> 
 
 # ==================== AUTH ENDPOINTS ====================
 
-@app.post("/api/auth/register", response_model=AuthResponse)
+@app.post("/api/auth/register")
 async def register_user(req: RegisterRequest):
     if not req.email or not req.password or not req.name:
         raise HTTPException(status_code=400, detail="Name, email, and password are required")
@@ -1303,23 +1310,53 @@ async def register_user(req: RegisterRequest):
     )
     conn.commit()
     user_id = cursor.lastrowid
-    user = conn.execute("SELECT id, email, name, plan, created_at, is_admin FROM users WHERE id = ?", (user_id,)).fetchone()
-    conn.close()
+
+    # Check if approval is required for new registrations
+    require_approval = True  # default
+    try:
+        setting = conn.execute("SELECT value FROM settings WHERE key = 'require_approval'").fetchone()
+        if setting:
+            require_approval = bool(int(setting["value"]))
+    except:
+        pass
+
+    if require_approval:
+        # Auto-approve if no admins exist yet (first user setup), otherwise pending
+        admin_exists = conn.execute("SELECT COUNT(*) as c FROM users WHERE is_admin = 1").fetchone()["c"]
+        if admin_exists > 0:
+            conn.execute("UPDATE users SET is_approved = 0 WHERE id = ?", (user_id,))
+            conn.commit()
+
+    user = conn.execute("SELECT id, email, name, plan, created_at, is_admin, is_approved FROM users WHERE id = ?", (user_id,)).fetchone()
 
     log_audit(user_id, "register", f"New account: {req.email}")
+
+    # If user is pending approval, don't return a token
+    if not user["is_approved"]:
+        conn.close()
+        return {"user": {"id": user_id, "email": req.email.lower(), "name": req.name, "plan": "free", "is_admin": False}, "token": None, "pending_approval": True, "message": "Your account has been created and is pending admin approval."}
+
+    conn.close()
     return AuthResponse(user=UserResponse(**dict(user)), token=create_token(user_id, req.email.lower()))
 
 @app.post("/api/auth/login", response_model=AuthResponse)
 async def login_user(req: LoginRequest, request: Request):
     conn = get_db()
     user = conn.execute("SELECT * FROM users WHERE email = ?", (req.email.lower(),)).fetchone()
-    conn.close()
     if not user:
+        conn.close()
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
     if hash_password(req.password, user["salt"]) != user["password_hash"]:
+        conn.close()
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
+    # Check if user is approved
+    if not user["is_approved"]:
+        conn.close()
+        raise HTTPException(status_code=403, detail="Your account is pending admin approval. Please wait for an administrator to approve your registration.")
+
+    conn.close()
     log_audit(user["id"], "login", f"Login from {request.client.host if hasattr(request, 'client') else 'unknown'}")
     return AuthResponse(
         user=UserResponse(id=user["id"], email=user["email"], name=user["name"],
@@ -2946,7 +2983,7 @@ async def get_all_users(user=Depends(get_current_user), search: Optional[str] = 
         raise HTTPException(status_code=403, detail="Admin access required")
 
     conn = get_db()
-    query = "SELECT id, email, name, plan, is_admin, generation_count, stripe_customer_id, created_at FROM users WHERE 1=1"
+    query = "SELECT id, email, name, plan, is_admin, is_approved, generation_count, stripe_customer_id, created_at FROM users WHERE 1=1"
     params = []
 
     if search:
@@ -2956,7 +2993,7 @@ async def get_all_users(user=Depends(get_current_user), search: Optional[str] = 
         query += " AND plan = ?"
         params.append(plan)
 
-    total = conn.execute(query.replace("SELECT id, email, name, plan, is_admin, generation_count, stripe_customer_id, created_at", "SELECT COUNT(*) as c"), params).fetchone()["c"]
+    total = conn.execute(query.replace("SELECT id, email, name, plan, is_admin, is_approved, generation_count, stripe_customer_id, created_at", "SELECT COUNT(*) as c"), params).fetchone()["c"]
 
     query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
     params.extend([limit, offset])
@@ -3027,6 +3064,93 @@ async def delete_user_admin(user_id: int, user=Depends(get_current_user)):
     except:
         pass
     return {"message": f"User {target['email']} deleted"}
+
+
+# ==================== ADMIN APPROVAL ENDPOINTS ====================
+
+@app.get("/api/admin/pending-users")
+async def get_pending_users(user=Depends(get_current_user)):
+    """Get users waiting for approval (admin only)"""
+    if not user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    conn = get_db()
+    pending = conn.execute(
+        "SELECT id, name, email, plan, created_at FROM users WHERE is_approved = 0 ORDER BY created_at DESC"
+    ).fetchall()
+    conn.close()
+    return {"pending_users": [dict(u) for u in pending], "count": len(pending)}
+
+
+@app.post("/api/admin/approve-user/{user_id}")
+async def approve_user(user_id: int, user=Depends(get_current_user)):
+    """Approve a pending user (admin only)"""
+    if not user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    conn = get_db()
+    target = conn.execute("SELECT id, email, name, is_approved FROM users WHERE id = ?", (user_id,)).fetchone()
+    if not target:
+        conn.close()
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if target["is_approved"]:
+        conn.close()
+        return {"message": f"User {target['email']} is already approved"}
+
+    conn.execute("UPDATE users SET is_approved = 1, updated_at = datetime('now') WHERE id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
+    try:
+        log_audit(user["id"], "approve_user", f"Approved: {target['email']}")
+    except:
+        pass
+
+    return {"message": f"User {target['email']} has been approved"}
+
+
+@app.post("/api/admin/reject-user/{user_id}")
+async def reject_user(user_id: int, user=Depends(get_current_user)):
+    """Reject and delete a pending user (admin only)"""
+    if not user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    conn = get_db()
+    target = conn.execute("SELECT id, email, name FROM users WHERE id = ?", (user_id,)).fetchone()
+    if not target:
+        conn.close()
+        raise HTTPException(status_code=404, detail="User not found")
+
+    conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
+    try:
+        log_audit(user["id"], "reject_user", f"Rejected: {target['email']}")
+    except:
+        pass
+
+    return {"message": f"User {target['email']} has been rejected and removed"}
+
+
+@app.post("/api/admin/toggle-approval")
+async def toggle_approval_requirement(request_data: dict = Body(...), user=Depends(get_current_user)):
+    """Toggle whether new registrations require approval (admin only)"""
+    if not user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    require_approval = request_data.get("require_approval", True)
+
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES ('require_approval', ?) ON CONFLICT(key) DO UPDATE SET value = ?",
+        (str(int(require_approval)), str(int(require_approval)))
+    )
+    conn.commit()
+    conn.close()
+
+    return {"require_approval": require_approval, "message": f"Registration approval {'enabled' if require_approval else 'disabled'}"}
 
 
 @app.get("/api/user/dashboard")

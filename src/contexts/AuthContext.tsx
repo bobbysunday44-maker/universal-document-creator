@@ -63,6 +63,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const register = async (name: string, email: string, password: string) => {
     const data = await apiRegister(name, email, password);
+    if (data.pending_approval) {
+      throw new Error('Your account has been created and is pending admin approval. You will be able to sign in once an admin approves your registration.');
+    }
     localStorage.setItem('udc_token', data.token);
     localStorage.setItem('udc_user', JSON.stringify(data.user));
     setUser(toUser(data.user));

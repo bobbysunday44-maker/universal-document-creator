@@ -43,6 +43,8 @@ export interface AuthUser {
 export interface AuthResponse {
   user: AuthUser;
   token: string;
+  pending_approval?: boolean;
+  message?: string;
 }
 
 export async function apiRegister(name: string, email: string, password: string): Promise<AuthResponse> {
@@ -562,6 +564,28 @@ export async function getAuditLogs(params?: { limit?: number; offset?: number; a
   if (params?.action) searchParams.set('action', params.action);
   const response = await fetch(`${API_BASE_URL}/api/admin/audit-logs?${searchParams}`, { headers: authHeaders() });
   if (!response.ok) throw new Error('Failed to load audit logs');
+  return response.json();
+}
+
+export async function getPendingUsers(): Promise<{ pending_users: any[]; count: number }> {
+  const response = await fetch(`${API_BASE_URL}/api/admin/pending-users`, { headers: authHeaders() });
+  if (!response.ok) throw new Error('Failed to load pending users');
+  return response.json();
+}
+
+export async function approveUser(userId: number): Promise<any> {
+  const response = await fetch(`${API_BASE_URL}/api/admin/approve-user/${userId}`, {
+    method: 'POST', headers: authHeaders()
+  });
+  if (!response.ok) throw new Error('Failed to approve user');
+  return response.json();
+}
+
+export async function rejectUser(userId: number): Promise<any> {
+  const response = await fetch(`${API_BASE_URL}/api/admin/reject-user/${userId}`, {
+    method: 'POST', headers: authHeaders()
+  });
+  if (!response.ok) throw new Error('Failed to reject user');
   return response.json();
 }
 
