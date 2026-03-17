@@ -4214,6 +4214,14 @@ button{{padding:12px 32px;border:none;border-radius:8px;cursor:pointer;font-size
 <div class="sign-section">
 <h3>Your Signature</h3>
 <p class="info">Draw your signature below</p>
+<div style="margin-bottom:12px;">
+<span class="info" style="margin-right:8px;">Ink color:</span>
+<button onclick="setInk('#0f172a')" style="width:28px;height:28px;border-radius:50%;border:2px solid #e2e8f0;background:#0f172a;cursor:pointer;margin:0 3px;" title="Black"></button>
+<button onclick="setInk('#1e3a5f')" style="width:28px;height:28px;border-radius:50%;border:2px solid #e2e8f0;background:#1e3a5f;cursor:pointer;margin:0 3px;" title="Navy"></button>
+<button onclick="setInk('#1a4d8f')" style="width:28px;height:28px;border-radius:50%;border:2px solid #e2e8f0;background:#1a4d8f;cursor:pointer;margin:0 3px;" title="Blue"></button>
+<button onclick="setInk('#7c3aed')" style="width:28px;height:28px;border-radius:50%;border:2px solid #e2e8f0;background:#7c3aed;cursor:pointer;margin:0 3px;" title="Purple"></button>
+<button onclick="setInk('#dc2626')" style="width:28px;height:28px;border-radius:50%;border:2px solid #e2e8f0;background:#dc2626;cursor:pointer;margin:0 3px;" title="Red"></button>
+</div>
 <canvas id="sigCanvas" width="500" height="200"></canvas><br><br>
 <button class="btn-clear" onclick="clearSig()">Clear</button>
 <button class="btn-sign" onclick="submitSig()">Sign Document</button>
@@ -4221,6 +4229,7 @@ button{{padding:12px 32px;border:none;border-radius:8px;cursor:pointer;font-size
 <script>
 const c=document.getElementById('sigCanvas'),ctx=c.getContext('2d');let drawing=false,lastX=0,lastY=0;
 ctx.strokeStyle='#0f172a';ctx.lineWidth=2;ctx.lineCap='round';
+function setInk(color){{ctx.strokeStyle=color;document.querySelectorAll('.sign-section button[onclick^=\"setInk\"]').forEach(b=>b.style.border='2px solid #e2e8f0');event.target.style.border='3px solid '+color}}
 c.addEventListener('mousedown',e=>{{drawing=true;[lastX,lastY]=[e.offsetX,e.offsetY]}});
 c.addEventListener('mousemove',e=>{{if(!drawing)return;ctx.beginPath();ctx.moveTo(lastX,lastY);ctx.lineTo(e.offsetX,e.offsetY);ctx.stroke();[lastX,lastY]=[e.offsetX,e.offsetY]}});
 c.addEventListener('mouseup',()=>drawing=false);c.addEventListener('mouseout',()=>drawing=false);
