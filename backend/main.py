@@ -1323,12 +1323,36 @@ def _render_table(story, rows, width, primary_color, border_color, bg_light, tex
     if not rows or len(rows) < 1:
         return
 
-    # Calculate column widths evenly
+    # Calculate column widths based on content length
     num_cols = len(rows[0])
-    col_widths = [width / num_cols] * num_cols
+    col_lengths = [0] * num_cols
+    for row in rows:
+        for i, cell in enumerate(row):
+            if i < num_cols:
+                col_lengths[i] = max(col_lengths[i], len(str(cell)))
+    total_len = sum(col_lengths) or 1
+    col_widths = []
+    for i in range(num_cols):
+        ratio = max(0.10, min(0.50, col_lengths[i] / total_len))
+        col_widths.append(ratio)
+    total_ratio = sum(col_widths)
+    col_widths = [(r / total_ratio) * width for r in col_widths]
+
+    # Wrap text in Paragraphs to prevent overflow
+    from reportlab.platypus import Paragraph as _P
+    from reportlab.lib.styles import ParagraphStyle as _PS
+    _hs = _PS('_th', fontName=font_bold, fontSize=8, textColor=white, leading=10)
+    _cs = _PS('_td', fontName=font_name, fontSize=8, textColor=text_dark, leading=10)
+    wrapped = []
+    for ri, row in enumerate(rows):
+        wr = []
+        for cell in row:
+            txt = str(cell).strip().replace('**', '')
+            wr.append(_P(txt, _hs if ri == 0 else _cs))
+        wrapped.append(wr)
 
     # Create table
-    table = Table(rows, colWidths=col_widths, repeatRows=1)
+    table = Table(wrapped, colWidths=col_widths, repeatRows=1)
 
     style_cmds = [
         # Header row
