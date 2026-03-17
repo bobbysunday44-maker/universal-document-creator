@@ -4234,7 +4234,15 @@ button{{padding:12px 32px;border:none;border-radius:8px;cursor:pointer;font-size
 </div>
 
 <div id="uploadSection" style="display:none;">
-<p class="info">Upload a PNG or JPG image of your signature (transparent background recommended)</p>
+<p class="info">Upload a PNG or JPG image of your signature — black ink will be recolored to your chosen color</p>
+<div style="margin-bottom:12px;">
+<span class="info" style="margin-right:8px;">Ink color for upload:</span>
+<button onclick="setUploadInk('#0f172a')" class="uink" style="width:28px;height:28px;border-radius:50%;border:2px solid #e2e8f0;background:#0f172a;cursor:pointer;margin:0 3px;" title="Black (no change)"></button>
+<button onclick="setUploadInk('#1e3a5f')" class="uink" style="width:28px;height:28px;border-radius:50%;border:2px solid #e2e8f0;background:#1e3a5f;cursor:pointer;margin:0 3px;" title="Navy"></button>
+<button onclick="setUploadInk('#1a4d8f')" class="uink" style="width:28px;height:28px;border-radius:50%;border:3px solid #1a4d8f;background:#1a4d8f;cursor:pointer;margin:0 3px;" title="Blue"></button>
+<button onclick="setUploadInk('#7c3aed')" class="uink" style="width:28px;height:28px;border-radius:50%;border:2px solid #e2e8f0;background:#7c3aed;cursor:pointer;margin:0 3px;" title="Purple"></button>
+<button onclick="setUploadInk('#dc2626')" class="uink" style="width:28px;height:28px;border-radius:50%;border:2px solid #e2e8f0;background:#dc2626;cursor:pointer;margin:0 3px;" title="Red"></button>
+</div>
 <input type="file" id="sigFile" accept="image/png,image/jpeg,image/webp" onchange="handleSigUpload(event)" style="display:none;" />
 <div id="uploadArea" onclick="document.getElementById('sigFile').click()" style="border:2px dashed #e2e8f0;border-radius:12px;padding:40px 20px;text-align:center;cursor:pointer;background:#f8fafc;transition:all 0.2s;">
 <div style="font-size:32px;margin-bottom:8px;">&#128196;</div>
@@ -4251,7 +4259,33 @@ button{{padding:12px 32px;border:none;border-radius:8px;cursor:pointer;font-size
 <button class="btn-sign" onclick="submitSig()">Sign Document</button>
 </div>
 <script>
-let sigMode='draw';let uploadedSigData=null;
+let sigMode='draw';let uploadedSigData=null;let uploadInkColor='#1a4d8f';let rawUploadData=null;
+function setUploadInk(color){{
+  uploadInkColor=color;
+  document.querySelectorAll('.uink').forEach(b=>b.style.border='2px solid #e2e8f0');
+  event.target.style.border='3px solid '+color;
+  if(rawUploadData)recolorAndPreview(rawUploadData);
+}}
+function hexToRgb(hex){{const r=parseInt(hex.slice(1,3),16),g=parseInt(hex.slice(3,5),16),b=parseInt(hex.slice(5,7),16);return[r,g,b]}}
+function recolorAndPreview(dataUrl){{
+  const img=new window.Image();
+  img.onload=function(){{
+    const cv=document.createElement('canvas');cv.width=img.width;cv.height=img.height;
+    const cx=cv.getContext('2d');cx.drawImage(img,0,0);
+    const id=cx.getImageData(0,0,cv.width,cv.height);const d=id.data;
+    const[tr,tg,tb]=hexToRgb(uploadInkColor);
+    for(let i=0;i<d.length;i+=4){{
+      const avg=(d[i]+d[i+1]+d[i+2])/3;
+      if(avg<140){{d[i]=tr;d[i+1]=tg;d[i+2]=tb;d[i+3]=255}}
+      else{{d[i+3]=0}}
+    }}
+    cx.putImageData(id,0,0);
+    uploadedSigData=cv.toDataURL('image/png');
+    document.getElementById('sigPreviewImg').src=uploadedSigData;
+    document.getElementById('sigPreview').style.display='block';
+    document.getElementById('uploadArea').style.display='none';
+  }};img.src=dataUrl;
+}}
 const c=document.getElementById('sigCanvas'),ctx=c.getContext('2d');let drawing=false,lastX=0,lastY=0;
 ctx.strokeStyle='#0f172a';ctx.lineWidth=2;ctx.lineCap='round';
 function setInk(color){{ctx.strokeStyle=color;document.querySelectorAll('#drawSection button[onclick^=\"setInk\"]').forEach(b=>b.style.border='2px solid #e2e8f0');event.target.style.border='3px solid '+color}}
@@ -4270,10 +4304,8 @@ function handleSigUpload(e){{
   const file=e.target.files[0];if(!file)return;
   const reader=new FileReader();
   reader.onload=function(ev){{
-    uploadedSigData=ev.target.result;
-    document.getElementById('sigPreviewImg').src=uploadedSigData;
-    document.getElementById('sigPreview').style.display='block';
-    document.getElementById('uploadArea').style.display='none';
+    rawUploadData=ev.target.result;
+    recolorAndPreview(rawUploadData);
   }};reader.readAsDataURL(file);
 }}
 function clearUpload(){{
