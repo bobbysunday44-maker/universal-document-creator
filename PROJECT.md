@@ -1,6 +1,6 @@
 # Universal Document Creator — Project Log
 
-> Last updated: March 16, 2026
+> Last updated: March 16, 2026 (Session 2)
 > Status: **READY FOR DEPLOYMENT** — All features built, tested, pushed to GitHub
 
 ---
@@ -9,21 +9,21 @@
 
 - **Repo:** https://github.com/bobbysunday44-maker/universal-document-creator
 - **Local path:** `C:\Users\bombo\Downloads\WORK PICTURES\Kimi_Agent_高端网站改造\app\`
-- **Backend:** `backend/main.py` — 4,404 lines, 89+ API endpoints, 14 database tables
-- **Frontend:** React 18 + TypeScript + Vite — 13 components, 4,520+ lines
+- **Backend:** `backend/main.py` — 4,700+ lines, 95+ API endpoints, 14 database tables
+- **Frontend:** React 18 + TypeScript + Vite — 13 components, 4,700+ lines
 - **Database:** SQLite (local) / PostgreSQL (production via Supabase)
 - **Desktop app:** pywebview launcher at `C:\Users\bombo\.universaldoc\launcher.pyw`
 - **Desktop shortcut:** UniversalDoc on desktop, uses Python 3.10
 - **Dev Python:** 3.14 (`C:\Python314\python.exe`)
 - **Desktop Python:** 3.10 (`C:\Users\bombo\AppData\Local\Programs\Python\Python310\python.exe`)
 - **Port:** 8001
-- **Total commits:** 15
+- **Total commits:** 18
 
 ---
 
 ## Where We Stopped
 
-### Completed
+### Completed (Session 1 — March 16)
 - All 33 features built and tested
 - Admin panel with 4 tabs (Overview, Users, Audit Logs, Branding)
 - Registration approval flow (admin approve/reject new users)
@@ -34,6 +34,14 @@
 - Mobile responsive: tested on iPhone (375px) and iPad (768px)
 - Full debug: 59/60 endpoints pass (1 transient Gemini rate limit)
 - README fully documented with architecture diagrams
+
+### Completed (Session 2 — March 16)
+- **E-signature upload mode** — signers can upload a signature image instead of drawing
+- **Ink color picker** — 5 colors (black, blue, navy, purple, red), applies to both draw and upload
+- **Auto-recolor** — uploaded black signatures are recolored to match chosen ink color via canvas pixel manipulation
+- **Soft refresh button** — header refresh icon that re-fetches all data without losing current view/tab (critical for desktop app where F5 is disabled)
+- Full debug: **62/62 endpoints pass**, 0 failures, 52/52 quick-check pass
+- TypeScript: 0 errors, frontend build clean
 
 ### Next Steps (When We Resume)
 1. **Deploy to FlokiNET VPS** (185.246.189.131, NL)
@@ -62,6 +70,9 @@
 
 | # | Hash | Description |
 |---|------|-------------|
+| 18 | `7c2a197` | Add soft refresh button — reloads data without losing current view |
+| 17 | `78af945` | Add ink color recoloring for uploaded signature images |
+| 16 | `85acf06` | Add signature image upload option to e-signature page |
 | 15 | `ac2025e` | Fix all footer links — every link now functional |
 | 14 | `7671174` | Final responsive fixes + complete verification |
 | 13 | `a3bc447` | Final debug pass: fix promote approval + update README |
@@ -107,7 +118,7 @@
 22. PostgreSQL migration script
 
 ### Competitive Features (13)
-23. E-signatures (canvas pad, sign URL, audit trail)
+23. E-signatures (canvas pad + image upload, 5 ink colors, auto-recolor, sign URL, audit trail)
 24. Document viewer analytics (opens, duration, scroll depth)
 25. Version history (auto-snapshot, restore)
 26. SEO analysis (Flesch-Kincaid, keyword density, score)
@@ -125,9 +136,13 @@
 36. AI chart generation (bar/line/pie/area in documents + PDF/DOCX embed)
 37. Registration approval flow (admin approve/reject)
 
+### Session 2 Features (2)
+38. Signature image upload with ink color recoloring (5 colors, auto-recolor black→chosen)
+39. Soft refresh button (re-fetch data without losing current view, for desktop app)
+
 ---
 
-## API Endpoint Summary (89+)
+## API Endpoint Summary (95+)
 
 ### Auth (7)
 - POST /api/auth/register, /api/auth/login, GET /api/auth/me
@@ -150,10 +165,11 @@
 - POST /api/export/text, /api/export/markdown
 - POST /api/render/chart
 
-### E-Signatures (4)
+### E-Signatures (5)
 - POST /api/documents/{id}/signature-request
 - GET /api/documents/{id}/signature-requests
 - GET /sign/{token}, POST /api/signatures/sign
+- POST /api/signatures/recolor (recolor uploaded signature image to chosen ink color)
 
 ### Analytics (2)
 - POST /api/track/view

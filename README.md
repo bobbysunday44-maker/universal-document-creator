@@ -53,7 +53,7 @@ Think of it as your own self-hosted alternative to PandaDoc, Jasper, or Gamma �
 +------------------------------------+-------------------------------+
                                      |
                                   REST API
-                                  (90+ endpoints)
+                                  (95+ endpoints)
                                      |
 +------------------------------------+-------------------------------+
 |                        BACKEND (FastAPI + Python)                  |
@@ -129,7 +129,7 @@ Think of it as your own self-hosted alternative to PandaDoc, Jasper, or Gamma �
 ### Collaboration & Enterprise
 - **Team/org management** — Create teams, add members, assign roles (admin/member)
 - **Shared templates** — Share document templates within your team
-- **E-signatures** — Built-in canvas signature pad with audit trail
+- **E-signatures** — Draw on canvas pad OR upload signature image, ink color picker (5 colors), auto-recolor black signatures to chosen color
 - **Document publishing** — One-click publish documents as public web pages
 - **Viewer analytics** — Track who opened your documents, time spent, scroll depth
 - **Version history** — Every edit is saved, view diffs, restore any version
@@ -554,7 +554,7 @@ audit_logs               | user_id (FK)     |    | signature_data   |
 ```
 universal-document-creator/
 +-- backend/
-|   +-- main.py                 # FastAPI server (4,500+ lines, 90+ endpoints)
+|   +-- main.py                 # FastAPI server (4,700+ lines, 95+ endpoints)
 |   +-- skills.md               # Built-in document templates
 |   +-- migrate_to_postgres.py  # PostgreSQL migration script
 |   +-- udc.db                  # SQLite database (auto-created)
