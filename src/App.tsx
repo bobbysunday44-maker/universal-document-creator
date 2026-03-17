@@ -225,6 +225,50 @@ function AppContent() {
     }
   }
 
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  const handleSoftRefresh = async () => {
+    setIsRefreshing(true);
+    try {
+      await Promise.all([
+        loadInitialData(),
+        isAuthenticated ? loadUserData() : Promise.resolve(),
+      ]);
+      // Refresh admin data if on admin view
+      if (currentView === 'admin' && user && (user as any).is_admin) {
+        try {
+          const [stats, usersData, logsData, branding, pendingData] = await Promise.all([
+            getAdminStats(),
+            getAdminUsers({ limit: 20 }),
+            getAuditLogs({ limit: 20 }),
+            getBranding(),
+            getPendingUsers(),
+          ]);
+          setAdminStats(stats);
+          setAdminUsers(usersData.users);
+          setAdminUsersTotal(usersData.total);
+          setAdminAuditLogs(logsData.logs);
+          setAdminAuditTotal(logsData.total);
+          setBrandingForm(branding);
+          setPendingUsers(pendingData.pending_users);
+          setPendingCount(pendingData.count);
+        } catch {}
+      }
+      // Refresh dashboard if on dashboard view
+      if (currentView === 'dashboard') {
+        try {
+          const data = await getDashboard();
+          setDashboardData(data);
+        } catch {}
+      }
+      toast.success('Refreshed');
+    } catch {
+      toast.error('Refresh failed');
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+
   const handleNavigate = (section: string) => {
     setCurrentSection(section);
     const element = document.getElementById(section);
@@ -1496,6 +1540,10 @@ function AppContent() {
                 <History className="w-4 h-4" />
               </Button>
             )}
+
+            <Button variant="outline" size="icon" onClick={handleSoftRefresh} disabled={isRefreshing} title="Refresh data">
+              {isRefreshing ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+            </Button>
 
             <Sheet open={sidebarOpen} onOpenChange={setSidebarOpen}>
               <SheetTrigger asChild>
