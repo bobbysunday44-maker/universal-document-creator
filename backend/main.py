@@ -4213,7 +4213,14 @@ button{{padding:12px 32px;border:none;border-radius:8px;cursor:pointer;font-size
 <div class="doc-content">{html_content}</div>
 <div class="sign-section">
 <h3>Your Signature</h3>
-<p class="info">Draw your signature below</p>
+<p class="info">Choose how to provide your signature</p>
+
+<div style="display:flex;gap:8px;margin-bottom:16px;">
+<button onclick="showTab('draw')" id="tabDraw" style="flex:1;padding:10px;border:2px solid #ea580c;background:#ea580c;color:white;border-radius:8px;cursor:pointer;font-weight:600;font-size:14px;">Draw Signature</button>
+<button onclick="showTab('upload')" id="tabUpload" style="flex:1;padding:10px;border:2px solid #e2e8f0;background:white;color:#334155;border-radius:8px;cursor:pointer;font-weight:600;font-size:14px;">Upload Image</button>
+</div>
+
+<div id="drawSection">
 <div style="margin-bottom:12px;">
 <span class="info" style="margin-right:8px;">Ink color:</span>
 <button onclick="setInk('#0f172a')" style="width:28px;height:28px;border-radius:50%;border:2px solid #e2e8f0;background:#0f172a;cursor:pointer;margin:0 3px;" title="Black"></button>
@@ -4224,12 +4231,57 @@ button{{padding:12px 32px;border:none;border-radius:8px;cursor:pointer;font-size
 </div>
 <canvas id="sigCanvas" width="500" height="200"></canvas><br><br>
 <button class="btn-clear" onclick="clearSig()">Clear</button>
+</div>
+
+<div id="uploadSection" style="display:none;">
+<p class="info">Upload a PNG or JPG image of your signature (transparent background recommended)</p>
+<input type="file" id="sigFile" accept="image/png,image/jpeg,image/webp" onchange="handleSigUpload(event)" style="display:none;" />
+<div id="uploadArea" onclick="document.getElementById('sigFile').click()" style="border:2px dashed #e2e8f0;border-radius:12px;padding:40px 20px;text-align:center;cursor:pointer;background:#f8fafc;transition:all 0.2s;">
+<div style="font-size:32px;margin-bottom:8px;">&#128196;</div>
+<p style="color:#64748b;font-size:14px;margin:0;">Click to upload signature image</p>
+<p style="color:#94a3b8;font-size:12px;margin:4px 0 0 0;">PNG, JPG or WEBP</p>
+</div>
+<div id="sigPreview" style="display:none;text-align:center;padding:16px;border:1px solid #e2e8f0;border-radius:8px;background:white;margin-top:12px;">
+<img id="sigPreviewImg" style="max-width:400px;max-height:150px;" />
+<br><button class="btn-clear" onclick="clearUpload()" style="margin-top:8px;">Remove</button>
+</div>
+</div>
+
+<br>
 <button class="btn-sign" onclick="submitSig()">Sign Document</button>
 </div>
 <script>
+let sigMode='draw';let uploadedSigData=null;
 const c=document.getElementById('sigCanvas'),ctx=c.getContext('2d');let drawing=false,lastX=0,lastY=0;
 ctx.strokeStyle='#0f172a';ctx.lineWidth=2;ctx.lineCap='round';
-function setInk(color){{ctx.strokeStyle=color;document.querySelectorAll('.sign-section button[onclick^=\"setInk\"]').forEach(b=>b.style.border='2px solid #e2e8f0');event.target.style.border='3px solid '+color}}
+function setInk(color){{ctx.strokeStyle=color;document.querySelectorAll('#drawSection button[onclick^=\"setInk\"]').forEach(b=>b.style.border='2px solid #e2e8f0');event.target.style.border='3px solid '+color}}
+function showTab(mode){{
+  sigMode=mode;
+  document.getElementById('drawSection').style.display=mode==='draw'?'block':'none';
+  document.getElementById('uploadSection').style.display=mode==='upload'?'block':'none';
+  document.getElementById('tabDraw').style.background=mode==='draw'?'#ea580c':'white';
+  document.getElementById('tabDraw').style.color=mode==='draw'?'white':'#334155';
+  document.getElementById('tabDraw').style.borderColor=mode==='draw'?'#ea580c':'#e2e8f0';
+  document.getElementById('tabUpload').style.background=mode==='upload'?'#ea580c':'white';
+  document.getElementById('tabUpload').style.color=mode==='upload'?'white':'#334155';
+  document.getElementById('tabUpload').style.borderColor=mode==='upload'?'#ea580c':'#e2e8f0';
+}}
+function handleSigUpload(e){{
+  const file=e.target.files[0];if(!file)return;
+  const reader=new FileReader();
+  reader.onload=function(ev){{
+    uploadedSigData=ev.target.result;
+    document.getElementById('sigPreviewImg').src=uploadedSigData;
+    document.getElementById('sigPreview').style.display='block';
+    document.getElementById('uploadArea').style.display='none';
+  }};reader.readAsDataURL(file);
+}}
+function clearUpload(){{
+  uploadedSigData=null;
+  document.getElementById('sigPreview').style.display='none';
+  document.getElementById('uploadArea').style.display='block';
+  document.getElementById('sigFile').value='';
+}}
 c.addEventListener('mousedown',e=>{{drawing=true;[lastX,lastY]=[e.offsetX,e.offsetY]}});
 c.addEventListener('mousemove',e=>{{if(!drawing)return;ctx.beginPath();ctx.moveTo(lastX,lastY);ctx.lineTo(e.offsetX,e.offsetY);ctx.stroke();[lastX,lastY]=[e.offsetX,e.offsetY]}});
 c.addEventListener('mouseup',()=>drawing=false);c.addEventListener('mouseout',()=>drawing=false);
@@ -4238,8 +4290,14 @@ c.addEventListener('touchmove',e=>{{e.preventDefault();if(!drawing)return;const 
 c.addEventListener('touchend',()=>drawing=false);
 function clearSig(){{ctx.clearRect(0,0,c.width,c.height)}}
 function submitSig(){{
-  const data=c.toDataURL('image/png');
-  if(ctx.getImageData(0,0,c.width,c.height).data.every((v,i)=>i%4===3?true:v===0)){{alert('Please draw your signature first');return}}
+  let data;
+  if(sigMode==='upload'){{
+    if(!uploadedSigData){{alert('Please upload a signature image first');return}}
+    data=uploadedSigData;
+  }}else{{
+    data=c.toDataURL('image/png');
+    if(ctx.getImageData(0,0,c.width,c.height).data.every((v,i)=>i%4===3?true:v===0)){{alert('Please draw your signature first');return}}
+  }}
   fetch('/api/signatures/sign',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{token:'{sign_token}',signature_data:data}})}})
   .then(r=>r.json()).then(d=>{{if(d.message){{document.body.innerHTML='<div style="text-align:center;padding:80px 20px"><h1 style="color:#10b981">Signed Successfully</h1><p>Thank you for signing this document.</p></div>'}}else{{alert(d.detail||"Error signing")}}}})
   .catch(()=>alert('Failed to submit signature'))
